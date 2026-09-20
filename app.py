@@ -1,4 +1,3 @@
-import os
 import re
 import json
 import requests
@@ -6,14 +5,40 @@ from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 # 100MB Upload limit for video/audio
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+DEFAULT_MODEL = 'gemini-3.5-flash-lite'
+
+# Reuse connections (TCP/TLS keep-alive) across requests
+http = requests.Session()
+
+_FENCE_START = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
+_FENCE_END = re.compile(r"\s*```$")
+_MODEL_CLEAN = re.compile(r'[^a-zA-Z0-9\-\.]')
+
 
 def strip_markdown_fences(text: str) -> str:
     t = text.strip()
     if t.startswith("```"):
-        t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
-        t = re.sub(r"\s*```$", "", t)
+        t = _FENCE_START.sub("", t)
+        t = _FENCE_END.sub("", t)
     return t.strip()
+
+
+def fmt_srt_time(sec: float) -> str:
+    total_ms = max(0, int(round(sec * 1000)))
+    h, rem = divmod(total_ms, 3600000)
+    m, rem = divmod(rem, 60000)
+    s, ms = divmod(rem, 1000)
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    return jsonify({"error": "ဖိုင်အရွယ်အစား 100MB ထက် မကျော်ရပါ"}), 413
+
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
@@ -26,30 +51,27 @@ def transcribe():
         files = {'file': (file.filename, file.read(), file.content_type or 'application/octet-stream')}
         data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
-        
-        # Absolute Pure String URL for Groq Whisper
-        groq_url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
-        res = requests.post(groq_url, headers=headers, files=files, data=data, timeout=180)
-        
+
+        res = http.post(GROQ_URL, headers=headers, files=files, data=data, timeout=180)
+
         if res.status_code != 200:
-            err_msg = res.json().get('error', {}).get('message', f'Groq Error ({res.status_code})')
+            try:
+                err_msg = res.json().get('error', {}).get('message') or f'Groq Error ({res.status_code})'
+            except Exception:
+                err_msg = f'Groq Error ({res.status_code})'
             return jsonify({"error": err_msg}), 400
 
-        result = res.json()
-        items = []
-        for idx, seg in enumerate(result.get('segments', []), 1):
-            s, e = seg['start'], seg['end']
-            def fmt(sec):
-                h, m, sc = int(sec // 3600), int((sec % 3600) // 60), sec % 60
-                return f"{h:02}:{m:02}:{int(sc):02},{int((sc % 1) * 1000):03}"
-            
-            items.append({
+        segments = res.json().get('segments') or []
+        items = [
+            {
                 "id": idx,
-                "startTime": fmt(s),
-                "endTime": fmt(e),
+                "startTime": fmt_srt_time(seg['start']),
+                "endTime": fmt_srt_time(seg['end']),
                 "originalText": seg['text'].strip(),
                 "translatedText": ""
-            })
+            }
+            for idx, seg in enumerate(segments, 1)
+        ]
         return jsonify({"subtitles": items})
     except requests.exceptions.Timeout:
         return jsonify({"error": "Audio transcription timed out"}), 504
@@ -58,12 +80,12 @@ def transcribe():
 
 @app.route('/api/translate', methods=['POST'])
 def translate():
-    req = request.json or {}
+    req = request.get_json(silent=True) or {}
     subtitles = req.get('subtitles', [])
     target_lang = req.get('targetLang', 'Burmese')
     tone_style = req.get('toneStyle', 'natural')
-    api_key = req.get('apiKey', '').strip()
-    raw_model = req.get('modelName', 'gemini-3.5-flash-lite').strip()
+    api_key = (req.get('apiKey') or '').strip()
+    raw_model = (req.get('modelName') or DEFAULT_MODEL).strip()
 
     if not api_key:
         return jsonify({"error": "Gemini API Key လိုအပ်ပါသည်"}), 400
@@ -71,9 +93,7 @@ def translate():
     if not subtitles:
         return jsonify({"error": "ဘာသာပြန်ရန် စာတန်းထိုး မရှိပါ"}), 400
 
-    model_id = re.sub(r'[^a-zA-Z0-9\-\.]', '', raw_model)
-    if not model_id:
-        model_id = 'gemini-3.5-flash-lite'
+    model_id = _MODEL_CLEAN.sub('', raw_model) or DEFAULT_MODEL
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie subtitles (သဘာဝကျကျ စကားပြောဟန်)',
@@ -93,9 +113,7 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        # Absolute Pure String URL for Gemini REST API
-        base_endpoint = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)"
-        endpoint = f"{base_endpoint}{model_id}:generateContent"
+        endpoint = f"{GEMINI_BASE_URL}{model_id}:generateContent"
         
         headers = {
             "Content-Type": "application/json",
@@ -117,7 +135,7 @@ def translate():
             }
         }
 
-        res = requests.post(endpoint, headers=headers, json=body, timeout=60)
+        res = http.post(endpoint, headers=headers, json=body, timeout=60)
 
         if res.status_code != 200:
             try:
@@ -128,11 +146,12 @@ def translate():
             return jsonify({"error": err_msg}), res.status_code
 
         res_json = res.json()
-        candidates = res_json.get('candidates', [])
+        candidates = res_json.get('candidates') or []
         if not candidates or 'content' not in candidates[0]:
             return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ"}), 400
 
-        raw_text = candidates[0]['content']['parts'][0]['text']
+        parts = candidates[0]['content'].get('parts') or []
+        raw_text = ''.join(p.get('text', '') for p in parts)
         cleaned_json = strip_markdown_fences(raw_text)
         translations = json.loads(cleaned_json)
 
@@ -364,11 +383,11 @@ HTML_PAGE = """<!DOCTYPE html>
       <span>🔑</span> API Key ယူနည်း အသေးစိတ် Guide
     </div>
 
-    <a class="drawer-item" href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" rel="noopener noreferrer">
+    <a class="drawer-item" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">
       <span>🌐</span> Google AI Studio Website ➔
     </a>
 
-    <a class="drawer-item" href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" rel="noopener noreferrer">
+    <a class="drawer-item" href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">
       <span>⚡</span> Groq Cloud Console Website ➔
     </a>
   </div>
@@ -543,7 +562,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <p style="margin-bottom: 6px;">• အောက်ပါခလုတ်ကို နှိပ်ပြီး Google AI Studio သို့ Gmail ဖြင့် Sign in ဝင်ပါ</p>
           <p style="margin-bottom: 6px;">• ပေါ်လာသော စာမျက်နှာတွင် <b>"Create API key"</b> ခလုတ်ကို နှိပ်ပါ</p>
           <p style="margin-bottom: 8px;">• ရလာသော <b>AIzaSy...</b> စာကြောင်းကို Copy ယူပြီး Settings တွင် Paste ချပါ</p>
-          <a href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" rel="noopener noreferrer" 
+          <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" 
              style="display: inline-block; background: #4f46e5; color: #fff; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 11px;">
             Google AI Studio သို့ သွားရန် ➔
           </a>
@@ -555,7 +574,7 @@ HTML_PAGE = """<!DOCTYPE html>
           <p style="margin-bottom: 6px;">• အောက်ပါခလုတ်ကို နှိပ်ပြီး Groq Console တွင် Free Account ဖွင့်ပါ</p>
           <p style="margin-bottom: 6px;">• <b>"Create API Key"</b> ခလုတ်ကို နှိပ်ပြီး နာမည်တစ်ခုခု ပေးပါ</p>
           <p style="margin-bottom: 8px;">• ရလာသော <b>gsk_...</b> စာကြောင်းကို Copy ယူပြီး Settings တွင် ထည့်ပါ</p>
-          <a href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" rel="noopener noreferrer" 
+          <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" 
              style="display: inline-block; background: #e11d48; color: #fff; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 11px;">
             Groq Console သို့ သွားရန် ➔
           </a>
@@ -570,6 +589,11 @@ HTML_PAGE = """<!DOCTYPE html>
     let subtitles = [];
     let isTranslating = false;
     let uploadedFileName = "subtitles";
+    let currentVideoUrl = null;
+    let timeIndex = [];
+    let lastOverlayText = null;
+    let statusTimer = null;
+    let progressTimer = null;
 
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
@@ -619,21 +643,15 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('fileInput').addEventListener('change', handleFileSelected);
 
       const video = document.getElementById('mainVideo');
+      const overlay = document.getElementById('liveSubText');
       video.addEventListener('timeupdate', () => {
         const cur = video.currentTime;
-        const curSub = subtitles.find(s => {
-          const st = timeToSec(s.startTime);
-          const et = timeToSec(s.endTime);
-          return cur >= st && cur <= et;
-        });
-        const overlay = document.getElementById('liveSubText');
-        if (curSub) {
-          overlay.innerText = curSub.translatedText || curSub.originalText;
-          overlay.style.display = 'inline-block';
-        } else {
-          overlay.innerText = '';
-          overlay.style.display = 'none';
-        }
+        const hit = timeIndex.find(x => cur >= x.st && cur <= x.et);
+        const text = hit ? (hit.s.translatedText || hit.s.originalText) : '';
+        if (text === lastOverlayText) return;
+        lastOverlayText = text;
+        overlay.innerText = text;
+        overlay.style.display = text ? 'inline-block' : 'none';
       });
     });
 
@@ -672,21 +690,24 @@ HTML_PAGE = """<!DOCTYPE html>
       const pill = document.getElementById('statusPill');
       document.getElementById('statusText').innerText = text;
       pill.style.display = 'flex';
-      if (duration > 0) setTimeout(() => pill.style.display = 'none', duration);
+      clearTimeout(statusTimer);
+      if (duration > 0) statusTimer = setTimeout(() => { pill.style.display = 'none'; }, duration);
     }
 
     function updateProgress(done, total) {
       const pContainer = document.getElementById('progressContainer');
       pContainer.style.display = 'block';
-      const pct = Math.round((done / total) * 100);
+      const pct = total ? Math.round((done / total) * 100) : 0;
       document.getElementById('progressBar').style.width = `${pct}%`;
       document.getElementById('progressText').innerText = `${pct}%`;
       document.getElementById('progressCount').innerText = `${done} / ${total}`;
-      if (done >= total) setTimeout(() => pContainer.style.display = 'none', 3000);
+      clearTimeout(progressTimer);
+      if (done >= total) progressTimer = setTimeout(() => { pContainer.style.display = 'none'; }, 3000);
     }
 
     async function handleFileSelected(e) {
       const file = e.target.files[0];
+      e.target.value = '';
       if (!file) return;
 
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
@@ -694,7 +715,9 @@ HTML_PAGE = """<!DOCTYPE html>
 
       if (['mp4', 'webm', 'mov'].includes(ext)) {
         const video = document.getElementById('mainVideo');
-        video.src = URL.createObjectURL(file);
+        if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+        currentVideoUrl = URL.createObjectURL(file);
+        video.src = currentVideoUrl;
         document.getElementById('videoContainer').style.display = 'block';
       }
 
@@ -727,6 +750,7 @@ HTML_PAGE = """<!DOCTYPE html>
           setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
         } catch(err) {
           alert("Error: " + err.message);
+          setStatus("Transcription မအောင်မြင်ပါ", 3000);
         }
       }
     }
@@ -774,6 +798,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function renderList() {
+      timeIndex = subtitles.map(s => ({ st: timeToSec(s.startTime), et: timeToSec(s.endTime), s }));
       const box = document.getElementById('subList');
       document.getElementById('subCount').innerText = subtitles.length;
 
@@ -794,6 +819,34 @@ HTML_PAGE = """<!DOCTYPE html>
       `).join('');
     }
 
+    async function requestTranslation(items, modelName, apiKey) {
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          subtitles: items.map(s => ({ id: s.id, originalText: s.originalText })),
+          targetLang: document.getElementById('targetLang').value,
+          toneStyle: document.getElementById('toneStyle').value,
+          modelName: modelName,
+          apiKey: apiKey
+        })
+      });
+
+      const responseText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (jsonErr) {
+        if (responseText.includes('<html') || responseText.includes('504') || responseText.includes('502')) {
+          throw new Error("Server Timeout ဖြစ်သွားပါသည် (Block Size လျှော့ပါ)");
+        }
+        throw new Error("AI output decode error");
+      }
+
+      if (!res.ok || data.error) throw new Error(data.error || "Request failed");
+      return Array.isArray(data.translations) ? data.translations : [];
+    }
+
     async function retranslateSingle(subId) {
       const item = subtitles.find(s => s.id === subId);
       if (!item) return;
@@ -804,22 +857,10 @@ HTML_PAGE = """<!DOCTYPE html>
 
       setStatus(`#${subId} ကို အသစ်ပြန်ဆိုနေပါသည်...`);
       try {
-        const res = await fetch('/api/translate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            subtitles: [{ id: item.id, originalText: item.originalText }],
-            targetLang: document.getElementById('targetLang').value,
-            toneStyle: document.getElementById('toneStyle').value,
-            modelName: modelName,
-            apiKey: geminiKey
-          })
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const translations = await requestTranslation([item], modelName, geminiKey);
 
-        if (data.translations && data.translations[0]) {
-          item.translatedText = data.translations[0].translatedText;
+        if (translations[0]) {
+          item.translatedText = translations[0].translatedText;
           renderList();
           setStatus(`#${subId} အသစ်ပြန်ဆိုပြီးပါပြီ!`, 3000);
         }
@@ -854,6 +895,7 @@ HTML_PAGE = """<!DOCTYPE html>
       isTranslating = true;
       document.getElementById('btnStop').style.display = 'inline-block';
 
+      const byId = new Map(subtitles.map(s => [s.id, s]));
       let completedCount = subtitles.length - pending.length;
       updateProgress(completedCount, subtitles.length);
 
@@ -868,35 +910,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
         while (!success && retries < 3 && isTranslating) {
           try {
-            const res = await fetch('/api/translate', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({
-                subtitles: chunk,
-                targetLang: document.getElementById('targetLang').value,
-                toneStyle: document.getElementById('toneStyle').value,
-                modelName: modelName,
-                apiKey: geminiKey
-              })
-            });
+            const translations = await requestTranslation(chunk, modelName, geminiKey);
 
-            const responseText = await res.text();
-            let data;
-
-            try {
-              data = JSON.parse(responseText);
-            } catch(jsonErr) {
-              if (responseText.includes('<html') || responseText.includes('504') || responseText.includes('502')) {
-                throw new Error("Server Timeout ဖြစ်သွားပါသည် (Block Size လျှော့ပါ)");
-              }
-              throw new Error("AI output decode error");
-            }
-
-            if (!res.ok || data.error) throw new Error(data.error || "Request failed");
-
-            if (Array.isArray(data.translations) && data.translations.length > 0) {
-              data.translations.forEach(t => {
-                const item = subtitles.find(x => x.id === t.id);
+            if (translations.length > 0) {
+              translations.forEach(t => {
+                const item = byId.get(Number(t.id));
                 if (item) item.translatedText = t.translatedText;
               });
               completedCount += chunk.length;
@@ -943,11 +961,14 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function triggerDownload(content, filename) {
       const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
+      a.href = url;
       a.download = filename;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(a.href);
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
     }
   </script>
 </body>
