@@ -55,7 +55,7 @@ def transcribe():
             })
         return jsonify({"subtitles": items})
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Audio transcription timed out (180s ကျော်လွန်သွားပါသည်)"}), 504
+        return jsonify({"error": "Audio transcription timed out"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -92,8 +92,13 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        clean_model = model_name.replace('models/', '')
-        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){clean_model}:generateContent"
+        # Markdown link တွေရောပါလာရင် ဖယ်ရှားပြီး model id သန့်သန့်ယူခြင်း
+        clean_model = re.sub(r'\[.*?\]\(.*?\)', '', model_name)
+        clean_model = clean_model.replace('models/', '').strip()
+        
+        # 100% Valid Google REST API URL
+        url = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)" + clean_model + ":generateContent"
+        
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key
@@ -121,13 +126,13 @@ def translate():
                 err_data = res.json().get('error', {})
                 err_msg = err_data.get('message', f'Gemini Error ({res.status_code})')
             except Exception:
-                err_msg = f'Gemini Server Error ({res.status_code})'
+                err_msg = f'Gemini Error ({res.status_code})'
             return jsonify({"error": err_msg}), res.status_code
         
         res_json = res.json()
         candidates = res_json.get('candidates', [])
         if not candidates or 'content' not in candidates[0]:
-            return jsonify({"error": "Gemini မှ အဖြေထုတ်မပေးနိုင်ပါ (Quota ပြည့်ခြင်း သို့မဟုတ် Filter ကြောင့်ဖြစ်နိုင်သည်)"}), 400
+            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Filter သို့မဟုတ် Quota Limit ကြောင့်ဖြစ်နိုင်သည်)"}), 400
 
         raw_text = candidates[0]['content']['parts'][0]['text']
         cleaned_json = clean_json_string(raw_text)
@@ -138,9 +143,9 @@ def translate():
 
         return jsonify({"translations": translations if isinstance(translations, list) else []})
     except requests.exceptions.Timeout:
-        return jsonify({"error": "Server Timeout ဖြစ်သွားပါသည် (စက္ကန့် ၆၀ ကျော်သွားပါသည်)။ Block Size ကို လျှော့ပေးပါ။"}), 504
+        return jsonify({"error": "Server Timeout ဖြစ်သွားပါသည် (Block Size ကို လျှော့ပေးပါ)"}), 504
     except json.JSONDecodeError:
-        return jsonify({"error": "AI ပြန်ပို့သော JSON format မမှန်ကန်ပါ၊ ပြန်လည်ကြိုးစားနေပါသည်..."}), 502
+        return jsonify({"error": "AI ပြန်ပို့သော JSON format မမှန်ပါ"}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -158,11 +163,12 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       min-height: 100vh;
-      padding-bottom: 90px;
+      padding-bottom: 95px;
+      overflow-x: hidden;
     }
     header {
       position: sticky; top: 0; z-index: 40;
-      background: rgba(36, 12, 26, 0.95);
+      background: rgba(36, 12, 26, 0.96);
       backdrop-filter: blur(10px);
       border-bottom: 1px solid rgba(244, 114, 182, 0.2);
       padding: 12px 16px;
@@ -193,7 +199,6 @@ HTML_PAGE = """<!DOCTYPE html>
       border-radius: 16px; padding: 14px;
     }
 
-    /* Upload Area */
     .upload-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
     .upload-info { display: flex; align-items: center; gap: 12px; }
     .upload-icon {
@@ -208,7 +213,6 @@ HTML_PAGE = """<!DOCTYPE html>
       padding: 9px 16px; border-radius: 12px; border: none; cursor: pointer;
     }
 
-    /* Controls inside Card */
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(244, 114, 182, 0.15); }
     @media(max-width: 480px) { .grid-2 { grid-template-columns: 1fr; } }
     
@@ -218,20 +222,27 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6; padding: 9px 12px; border-radius: 10px; font-size: 12px; outline: none;
     }
 
-    /* Progress & Status */
     #progressContainer { display: none; margin-top: 5px; }
     .progress-bar-bg { width: 100%; background: #26081c; border: 1px solid rgba(244, 114, 182, 0.2); border-radius: 20px; height: 8px; overflow: hidden; }
     .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #e11d48, #ec4899); transition: width 0.3s; }
     .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: #f472b6; margin-top: 4px; }
     
+    /* Fixed Status Pill so Stop button NEVER overflows */
     #statusPill {
-      display: none; background: rgba(54, 14, 38, 0.9); border: 1px solid rgba(244, 114, 182, 0.3);
-      border-radius: 12px; padding: 8px 12px; font-size: 11px; color: #fbcfe8;
-      align-items: center; justify-content: space-between; gap: 8px;
+      display: none; background: rgba(54, 14, 38, 0.95); border: 1px solid rgba(244, 114, 182, 0.35);
+      border-radius: 14px; padding: 10px 12px; font-size: 11px; color: #fbcfe8;
+      align-items: center; justify-content: space-between; gap: 10px;
+      width: 100%; overflow: hidden;
     }
-    .btn-stop { background: #9f1239; color: white; border: none; padding: 4px 10px; border-radius: 8px; font-size: 10px; font-weight: bold; cursor: pointer; }
+    #statusText {
+      flex: 1; min-width: 0; word-break: break-word; overflow-wrap: anywhere; line-height: 1.4;
+    }
+    .btn-stop {
+      background: #be123c; color: white; border: none; padding: 6px 12px;
+      border-radius: 10px; font-size: 11px; font-weight: bold; cursor: pointer;
+      flex-shrink: 0; white-space: nowrap;
+    }
 
-    /* Subtitle Item Cards */
     .sub-item {
       background: rgba(38, 12, 27, 0.85); border: 1px solid rgba(244, 114, 182, 0.15);
       border-radius: 14px; padding: 12px; margin-bottom: 8px;
@@ -244,10 +255,9 @@ HTML_PAGE = """<!DOCTYPE html>
       border-radius: 10px; color: #fff; padding: 8px; font-size: 12px; resize: none; outline: none;
     }
 
-    /* Sticky Footer */
     footer {
       position: fixed; bottom: 0; left: 0; right: 0; z-index: 30;
-      background: rgba(30, 8, 22, 0.96); backdrop-filter: blur(12px);
+      background: rgba(30, 8, 22, 0.98); backdrop-filter: blur(12px);
       border-top: 1px solid rgba(244, 114, 182, 0.2);
       padding: 10px 16px; max-width: 680px; margin: 0 auto;
     }
@@ -263,7 +273,6 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6; font-size: 11px; font-weight: 600; padding: 11px 12px; border-radius: 12px; cursor: pointer;
     }
 
-    /* Modal */
     .modal-overlay {
       position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,0.75);
       backdrop-filter: blur(6px); display: none; align-items: center; justify-content: center; padding: 16px;
@@ -305,7 +314,7 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Status Banner -->
+    <!-- Status Banner with Guaranteed Fixed Layout -->
     <div id="statusPill">
       <span id="statusText">Ready</span>
       <button id="btnStop" class="btn-stop" onclick="stopTranslation()" style="display:none;">Stop ⏹</button>
@@ -357,7 +366,7 @@ HTML_PAGE = """<!DOCTYPE html>
     <div id="subList">
       <div class="card" style="text-align: center; padding: 40px 10px; color: #f472b6;">
         <div style="font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px;">No Subtitles Loaded</div>
-        <div style="font-size: 11px; opacity: 0.8;">Choose File နှိပ်၍ .srt ဖိုင် သို့မဟုတ် ဗီဒီယို တင်ပေးပါ</div>
+        <div style="font-size: 11px; opacity: 0.8;">Choose File နှိပ်၍ .srt ဖိုင် တင်ပေးပါ</div>
       </div>
     </div>
   </div>
@@ -713,7 +722,9 @@ HTML_PAGE = """<!DOCTYPE html>
           } catch(e) {
             retries++;
             const waitSec = retries * 8;
-            setStatus(`သတိပေးချက်: ${e.message} — ${waitSec}s အကြာတွင် ပြန်လည်ကြိုးစားပါမည် (${retries}/3)...`);
+            // Short clean error message so it never stretches the UI
+            const shortErr = e.message.length > 50 ? e.message.substring(0, 50) + "..." : e.message;
+            setStatus(`Warning: ${shortErr} — ${waitSec}s အကြာတွင် ပြန်လည်ကြိုးစားပါမည် (${retries}/3)...`);
             await sleep(waitSec * 1000);
           }
         }
