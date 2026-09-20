@@ -2,6 +2,7 @@ import os
 import re
 import json
 import requests
+import time
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
@@ -32,7 +33,7 @@ def transcribe():
     file = request.files.get('file')
     api_key = request.form.get('apiKey')
     if not file or not api_key:
-        return jsonify({"error": "Video/Audio အတွက် Groq API Key လိုအပ်ပါသည်"}), 400
+        return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
 
     try:
         files = {'file': (file.filename, file.read(), file.content_type)}
@@ -78,7 +79,7 @@ def translate():
     tone_style = req.get('toneStyle', 'natural')
     provider = req.get('provider', 'gemini')
     api_key = req.get('apiKey', '')
-    model_name = req.get('modelName', 'gemini-1.5-flash')
+    model_name = req.get('modelName', 'gemini-3.5-flash')
 
     if not api_key:
         return jsonify({"error": f"{provider.upper()} API Key မရှိသေးပါ။ Menu -> Settings ထဲတွင် ထည့်သွင်းပေးပါ"}), 400
@@ -108,7 +109,7 @@ def translate():
             headers = {"Content-Type": "application/json"}
             body = {
                 "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3}
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.25}
             }
             res = requests.post(url, headers=headers, json=body, timeout=120)
             if res.status_code != 200:
@@ -129,7 +130,7 @@ def translate():
                     {"role": "user", "content": json.dumps(payload_data)}
                 ],
                 "response_format": {"type": "json_object"},
-                "temperature": 0.3
+                "temperature": 0.25
             }
             res = requests.post(url, headers=headers, json=body, timeout=120)
             if res.status_code != 200:
@@ -224,7 +225,7 @@ HTML_PAGE = """<!DOCTYPE html>
         </label>
       </div>
 
-      <!-- 2. Target Language & Tone Style Options (File Upload အောက်) -->
+      <!-- 2. Target Language & Tone Style Options -->
       <div class="pt-3 border-t border-rose-900/60 grid grid-cols-1 md:grid-cols-2 gap-2.5">
         <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">Target Language (ပြောင်းမည့် ဘာသာစကား)</label>
@@ -268,25 +269,24 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- Sticky Bottom Controls: Engine Switcher & Export Actions -->
   <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex flex-col gap-2 max-w-lg mx-auto md:max-w-xl">
     
-    <!-- Translation Engine Quick Switcher -->
+    <!-- Translation Engine Switcher with Gemini 3.5 Flash -->
     <div class="flex items-center justify-between text-xs px-1">
       <span class="text-[11px] text-rose-300 font-medium">Translate with:</span>
-      <div class="flex items-center gap-1.5">
-        <label class="flex items-center gap-1 cursor-pointer">
+      <div class="flex items-center gap-2">
+        <label class="flex items-center gap-1.5 cursor-pointer">
           <input type="radio" name="transEngine" value="gemini" checked onchange="saveActiveEngine('gemini')" class="accent-rose-500">
-          <span class="text-xs text-indigo-300 font-medium">Gemini 1.5 Flash</span>
+          <span class="text-xs text-indigo-300 font-semibold">Gemini 3.5 Flash</span>
         </label>
         <span class="text-rose-700">|</span>
-        <label class="flex items-center gap-1 cursor-pointer">
+        <label class="flex items-center gap-1.5 cursor-pointer">
           <input type="radio" name="transEngine" value="groq" onchange="saveActiveEngine('groq')" class="accent-rose-500">
-          <span class="text-xs text-pink-300 font-medium">Groq (Llama 3.3)</span>
+          <span class="text-xs text-pink-300 font-semibold">Groq (Llama 3.3)</span>
         </label>
       </div>
     </div>
 
     <!-- Buttons Row -->
     <div class="flex items-center gap-2">
-      <!-- Translate All -->
       <button onclick="translateAll()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"/>
@@ -294,7 +294,6 @@ HTML_PAGE = """<!DOCTYPE html>
         <span>Translate All</span>
       </button>
 
-      <!-- Download Original SRT -->
       <button onclick="downloadOriginalSRT()" title="Download Original SRT" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
@@ -302,7 +301,6 @@ HTML_PAGE = """<!DOCTYPE html>
         <span>Original .SRT</span>
       </button>
 
-      <!-- Download Translated SRT -->
       <button onclick="downloadTranslatedSRT()" title="Download Translated SRT" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
@@ -311,6 +309,22 @@ HTML_PAGE = """<!DOCTYPE html>
       </button>
     </div>
   </footer>
+
+  <!-- ================= ROMANTIC THEMED ALERT MODAL ================= -->
+  <div id="customAlertModal" class="fixed inset-0 bg-black/70 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-rose-950 border border-rose-700/70 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4 romantic-card text-center">
+      <div class="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 mx-auto flex items-center justify-center text-xl shadow">
+        ✨
+      </div>
+      <div>
+        <h3 id="customAlertTitle" class="text-sm font-bold text-white mb-1.5">သတိပေးချက်</h3>
+        <p id="customAlertMessage" class="text-xs text-rose-200/90 leading-relaxed"></p>
+      </div>
+      <button onclick="closeCustomAlert()" class="w-full bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 text-white font-semibold py-2.5 rounded-xl text-xs shadow transition active:scale-95">
+        နားလည်ပါပြီ
+      </button>
+    </div>
+  </div>
 
   <!-- ================= RIGHT DRAWER MENU ================= -->
   <div id="menuOverlay" onclick="toggleMenu(false)" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden transition-opacity"></div>
@@ -335,7 +349,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <span class="text-rose-400 font-bold">➔</span>
       </button>
 
-      <!-- API Key ယူနည်း လမ်းညွှန် -->
+      <!-- API Key Guide -->
       <div class="romantic-card rounded-2xl p-4 border border-rose-900/60 space-y-3">
         <div class="flex items-center gap-2 text-rose-300 font-semibold border-b border-rose-900/60 pb-2">
           <span>🔑</span>
@@ -348,7 +362,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Console</span>
           </a>
           <p class="text-[11px] text-rose-200/80 leading-relaxed pl-1">
-            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး Google Account ဖြင့် ဝင်ပါ။ <strong>"Create API Key"</strong> နှိပ်ပြီး ယူပါ။ (Audio/Video transcribe ရန် မဖြစ်မနေ လိုအပ်ပါသည်)
+            <strong>ယူနည်း:</strong> Google Account ဖြင့် ဝင်၍ <strong>"Create API Key"</strong> နှိပ်ယူပါ။ (အသံဖိုင် စာတန်းထိုးထုတ်ရန် လိုအပ်ပါသည်)
           </p>
         </div>
 
@@ -358,7 +372,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">AI Studio</span>
           </a>
           <p class="text-[11px] text-rose-200/80 leading-relaxed pl-1">
-            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး <strong>"Create API key in new project"</strong> နှိပ်ကာ ကူးယူပါ။
+            <strong>ယူနည်း:</strong> Google AI Studio တွင် <strong>"Create API key"</strong> နှိပ်၍ Copy ကူးယူပါ။
           </p>
         </div>
       </div>
@@ -398,7 +412,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">Gemini Model Name</label>
-          <input id="modalGeminiModel" type="text" value="gemini-1.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
+          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
       </div>
 
@@ -418,15 +432,29 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_TRANS_ENGINE = 'thiri_koko_trans_engine';
     const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
 
+    // Sleep Helper for Rate Limit Prevention
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
       document.getElementById('modalGeminiKey').value = localStorage.getItem(KEY_GEMINI) || '';
-      document.getElementById('modalGeminiModel').value = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-1.5-flash';
+      // Default to gemini-3.5-flash
+      document.getElementById('modalGeminiModel').value = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash';
 
       const engine = localStorage.getItem(KEY_TRANS_ENGINE) || 'gemini';
       const radio = document.querySelector(`input[name="transEngine"][value="${engine}"]`);
       if (radio) radio.checked = true;
     });
+
+    function showCustomAlert(msg, title = "သတိပေးချက်") {
+      document.getElementById('customAlertTitle').innerText = title;
+      document.getElementById('customAlertMessage').innerText = msg;
+      document.getElementById('customAlertModal').classList.remove('hidden');
+    }
+
+    function closeCustomAlert() {
+      document.getElementById('customAlertModal').classList.add('hidden');
+    }
 
     function handleLangChange() {
       const lang = document.getElementById('targetLang').value;
@@ -461,7 +489,7 @@ HTML_PAGE = """<!DOCTYPE html>
     function saveSettings() {
       localStorage.setItem(KEY_GROQ, document.getElementById('modalGroqKey').value.trim());
       localStorage.setItem(KEY_GEMINI, document.getElementById('modalGeminiKey').value.trim());
-      localStorage.setItem(KEY_GEMINI_MODEL, document.getElementById('modalGeminiModel').value.trim() || 'gemini-1.5-flash');
+      localStorage.setItem(KEY_GEMINI_MODEL, document.getElementById('modalGeminiModel').value.trim() || 'gemini-3.5-flash');
       closeSettingsModal();
       setStatus("API Keys မှတ်သားပြီးပါပြီ!", 3000);
     }
@@ -490,8 +518,7 @@ HTML_PAGE = """<!DOCTYPE html>
       } else {
         const groqKey = localStorage.getItem(KEY_GROQ);
         if (!groqKey) {
-          alert('Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu -> Settings တွင် Groq API Key အရင်ထည့်ပေးပါခင်ဗျာ။');
-          openSettingsModal();
+          showCustomAlert('Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu -> Settings တွင် Groq API Key ထည့်သွင်းပေးပါခင်ဗျာ။');
           return;
         }
 
@@ -508,7 +535,7 @@ HTML_PAGE = """<!DOCTYPE html>
           renderList();
           setStatus("Original Subtitles ထုတ်ယူပြီးပါပြီ!", 3000);
         } catch(err) {
-          alert("Error: " + err.message);
+          showCustomAlert(err.message, "Transcription Error");
           clearStatus();
         }
       }
@@ -576,22 +603,20 @@ HTML_PAGE = """<!DOCTYPE html>
       const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
       const groqKey = localStorage.getItem(KEY_GROQ) || '';
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const geminiModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-1.5-flash';
+      const geminiModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash';
 
       const apiKey = (selectedEngine === 'gemini') ? geminiKey : groqKey;
       const modelName = (selectedEngine === 'gemini') ? geminiModel : 'llama-3.3-70b-versatile';
 
       if (!apiKey) {
-        alert(`${selectedEngine.toUpperCase()} API Key မရှိသေးပါ။ Menu -> Settings တွင် API Key အရင်ထည့်ပေးပါခင်ဗျာ။`);
-        openSettingsModal();
+        showCustomAlert(`${selectedEngine.toUpperCase()} API Key မရှိသေးပါ။ Menu -> Settings တွင် API Key အရင်ထည့်ပေးပါခင်ဗျာ။`);
         return;
       }
       if (!subtitles.length) {
-        alert("ဘာသာပြန်ရန် Subtitle မရှိသေးပါ");
+        showCustomAlert("ဘာသာပြန်ရန် Subtitle မရှိသေးပါ");
         return;
       }
 
-      setStatus(`${selectedEngine.toUpperCase()} ဖြင့် ဘာသာပြန်ဆိုနေပါသည်...`);
       const chunkSize = 20;
       const targetLang = document.getElementById('targetLang').value;
       const toneStyle = document.getElementById('toneStyle').value;
@@ -600,39 +625,56 @@ HTML_PAGE = """<!DOCTYPE html>
         const chunk = subtitles.slice(i, i + chunkSize);
         setStatus(`ဘာသာပြန်နေပါသည်: ${i + 1} မှ ${Math.min(i + chunkSize, subtitles.length)} အထိ...`);
 
-        try {
-          const res = await fetch('/api/translate', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              subtitles: chunk,
-              targetLang: targetLang,
-              toneStyle: toneStyle,
-              provider: selectedEngine,
-              modelName: modelName,
-              apiKey: apiKey
-            })
-          });
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
+        let success = false;
+        let retries = 0;
 
-          data.translations.forEach(t => {
-            const item = subtitles.find(x => x.id === t.id);
-            if (item) item.translatedText = t.translatedText;
-          });
-          renderList();
-        } catch(err) {
-          alert("Error: " + err.message);
-          break;
+        // Auto-Retry Loop (3 ကြိမ် အလိုအလျောက် ပြန်စမ်းပေးခြင်း)
+        while (!success && retries < 3) {
+          try {
+            const res = await fetch('/api/translate', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                subtitles: chunk,
+                targetLang: targetLang,
+                toneStyle: toneStyle,
+                provider: selectedEngine,
+                modelName: modelName,
+                apiKey: apiKey
+              })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            data.translations.forEach(t => {
+              const item = subtitles.find(x => x.id === t.id);
+              if (item) item.translatedText = t.translatedText;
+            });
+            renderList();
+            success = true;
+
+            // Rate Limit မဖြစ်စေရန် Chunk တိုင်းကြားတွင် 1.5 စက္ကန့် နားပေးခြင်း
+            await sleep(1500);
+
+          } catch(err) {
+            retries++;
+            if (retries < 3) {
+              setStatus(`Server ကြပ်နေသဖြင့် ခေတ္တစောင့်ပြီး ပြန်လည်ကြိုးစားနေပါသည် (${retries}/3)...`);
+              await sleep(3500); // 3.5 စက္ကန့် စောင့်ပြီး retry ပြုလုပ်ခြင်း
+            } else {
+              showCustomAlert(`Error ဖြစ်ပေါ်ခဲ့ပါသည်- ${err.message}\n(Groq Engine သို့ ပြောင်းလဲ၍လည်း စမ်းသပ်နိုင်ပါသည်)`, "ဘာသာပြန်ဆိုမှု အဆင်မပြေပါ");
+              clearStatus();
+              return;
+            }
+          }
         }
       }
-      setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
+      setStatus("ဘာသာပြန်ဆိုခြင်း အောင်မြင်စွာ ပြီးစီးပါပြီ!", 4000);
     }
 
-    // Export Original SRT File
     function downloadOriginalSRT() {
       if (!subtitles.length) {
-        alert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
+        showCustomAlert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
         return;
       }
       let out = "";
@@ -646,10 +688,9 @@ HTML_PAGE = """<!DOCTYPE html>
       a.click();
     }
 
-    // Export Translated SRT File
     function downloadTranslatedSRT() {
       if (!subtitles.length) {
-        alert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
+        showCustomAlert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
         return;
       }
       let out = "";
