@@ -1,32 +1,9 @@
-import os
-import re
 import json
 import requests
-import time
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
-
-def parse_srt(srt_text):
-    blocks = re.split(r'\n\s*\n', srt_text.strip().replace('\r\n', '\n'))
-    items = []
-    for block in blocks:
-        lines = block.strip().split('\n')
-        if len(lines) >= 2:
-            time_idx = 1 if lines[0].strip().isdigit() else 0
-            if time_idx < len(lines) and '-->' in lines[time_idx]:
-                time_line = lines[time_idx]
-                text = "\n".join(lines[time_idx + 1:]).strip()
-                start, end = [t.strip() for t in time_line.split('-->')]
-                items.append({
-                    "id": len(items) + 1,
-                    "startTime": start,
-                    "endTime": end,
-                    "originalText": text,
-                    "translatedText": ""
-                })
-    return items
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB (Groq Free Tier limits)
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
@@ -37,7 +14,8 @@ def transcribe():
 
     try:
         files = {'file': (file.filename, file.read(), file.content_type or 'application/octet-stream')}
-        data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
+        # whisper-large-v3-turbo ဖြင့် အလွန်မြန်ဆန်အောင် ပြောင်းလဲထားခြင်း
+        data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         
         res = requests.post(
@@ -45,7 +23,7 @@ def transcribe():
             headers=headers,
             files=files,
             data=data,
-            timeout=300
+            timeout=180
         )
         
         if res.status_code != 200:
@@ -86,36 +64,51 @@ def translate():
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie/drama subtitles (သဘာဝကျကျ စကားပြောဟန်)',
-        'formal': 'polite, elegant literary style for documentaries or official media (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
-        'explaining': 'clear, easy-to-understand educational/explaining style (နားလည်လွယ်အောင် ရှင်းပြဟန်)',
+        'formal': 'polite, elegant literary style for documentaries (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
+        'explaining': 'clear, educational/explaining style (နားလည်လွယ်အောင် ရှင်းပြဟန်)',
         'casual': 'relaxed, youthful casual style with modern slangs (ပေါ့ပေါ့ပါးပါး လူငယ်သုံး)'
     }
     chosen_tone = tone_descriptions.get(tone_style, tone_descriptions['natural'])
 
     system_prompt = (
-        f"You are a professional audiovisual subtitle translator. "
-        f"Translate the following subtitles into {target_lang}. "
-        f"Translation Style Instruction: {chosen_tone}. "
-        f"Maintain natural flow, concise phrasing, and subtitle reading speed. "
-        f"Output STRICTLY a valid JSON array of objects with keys 'id' (number) and 'translatedText' (string). "
-        f"Do NOT omit or merge any IDs. "
-        f"Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
+        f"You are an audiovisual subtitle translator. "
+        f"Translate the subtitles into {target_lang}. "
+        f"Style: {chosen_tone}. Output valid JSON matching the schema."
     )
 
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
         if provider == 'gemini':
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            headers = {"Content-Type": "application/json"}
+            # Header တွင် Key ပို့ဆောင်ခြင်း (Security Fix)
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key
+            }
             body = {
                 "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.25}
+                "generationConfig": {
+                    "responseMimeType": "application/json",
+                    "responseSchema": {
+                        "type": "ARRAY",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "id": {"type": "INTEGER"},
+                                "translatedText": {"type": "STRING"}
+                            },
+                            "required": ["id", "translatedText"]
+                        }
+                    },
+                    "temperature": 0.25,
+                    "thinkingConfig": {"thinkingLevel": "minimal"} # Reasoning time လျှော့ချခြင်း
+                }
             }
-            res = requests.post(url, headers=headers, json=body, timeout=90)
+            res = requests.post(url, headers=headers, json=body, timeout=45)
             if res.status_code != 200:
                 err_data = res.json().get('error', {})
-                return jsonify({"error": err_data.get('message', 'Gemini API Error')}), 400
+                return jsonify({"error": err_data.get('message', 'Gemini API Error')}), res.status_code
             
             res_json = res.json()
             raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
@@ -133,14 +126,14 @@ def translate():
                 "response_format": {"type": "json_object"},
                 "temperature": 0.25
             }
-            res = requests.post(url, headers=headers, json=body, timeout=90)
+            res = requests.post(url, headers=headers, json=body, timeout=45)
             if res.status_code != 200:
-                return jsonify({"error": res.json().get('error', {}).get('message', 'Groq API Error')}), 400
+                return jsonify({"error": res.json().get('error', {}).get('message', 'Groq API Error')}), res.status_code
             
             parsed = json.loads(res.json()['choices'][0]['message']['content'])
             translations = parsed if isinstance(parsed, list) else parsed.get('translations', parsed.get('subtitles', []))
 
-        return jsonify({"translations": translations})
+        return jsonify({"translations": translations if isinstance(translations, list) else []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -148,29 +141,24 @@ HTML_PAGE = """<!DOCTYPE html>
 <html lang="my" class="h-full">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Thiri's Koko — AI Subtitle Studio Pro</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Padauk:wght@400;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Padauk:wght@400;700&display=swap" rel="stylesheet">
   <style>
     body {
       background: radial-gradient(circle at 50% 0%, #290d1f 0%, #11050c 100%);
       font-family: 'Plus Jakarta Sans', 'Padauk', sans-serif;
-      -webkit-tap-highlight-color: transparent;
     }
     .romantic-card {
       background: rgba(36, 14, 26, 0.82);
       backdrop-filter: blur(14px);
-      -webkit-backdrop-filter: blur(14px);
       border: 1px solid rgba(243, 146, 189, 0.18);
     }
     .romantic-glow {
       box-shadow: 0 4px 20px -2px rgba(219, 39, 119, 0.35);
-    }
-    .drawer-transition {
-      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     }
   </style>
 </head>
@@ -189,17 +177,27 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
-      <button onclick="toggleFindReplace()" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-300 hover:text-white text-xs flex items-center gap-1 transition" title="Find & Replace">
+      <button onclick="toggleFindReplace()" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-300 hover:text-white text-xs transition" title="Find & Replace">
         <span>🔍</span>
       </button>
-
-      <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition active:scale-95" aria-label="Menu">
+      <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition" aria-label="Menu">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
         </svg>
       </button>
     </div>
   </header>
+
+  <!-- Progress Bar (New Feature) -->
+  <div id="progressContainer" class="hidden px-4 pt-2 max-w-3xl mx-auto w-full">
+    <div class="w-full bg-rose-950/80 rounded-full h-2 border border-rose-900/60 overflow-hidden">
+      <div id="progressBar" class="bg-gradient-to-r from-rose-500 to-pink-400 h-full transition-all duration-300" style="width: 0%"></div>
+    </div>
+    <div class="flex justify-between text-[10px] text-rose-300/80 mt-1">
+      <span id="progressText">0%</span>
+      <span id="progressCount">0 / 0</span>
+    </div>
+  </div>
 
   <!-- Find & Replace -->
   <div id="findReplaceBar" class="hidden px-4 pt-2.5 max-w-3xl mx-auto w-full">
@@ -218,13 +216,18 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Status Pill -->
-  <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-center gap-2 shadow-sm">
-    <div class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
-    <span id="statusText">Processing...</span>
+  <!-- Status Banner -->
+  <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-between shadow-sm max-w-3xl md:mx-auto">
+    <div class="flex items-center gap-2">
+      <div class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
+      <span id="statusText">Processing...</span>
+    </div>
+    <button id="btnStop" onclick="stopTranslation()" class="hidden px-2.5 py-1 rounded-lg bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-semibold transition">
+      Stop ⏹
+    </button>
   </div>
 
-  <!-- Workspace -->
+  <!-- Main Container -->
   <main class="flex-1 px-4 py-3 max-w-3xl mx-auto w-full flex flex-col gap-3">
     
     <!-- Video Player Preview -->
@@ -237,7 +240,7 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Upload & Language Preferences -->
+    <!-- Upload & Language Options -->
     <div class="romantic-card rounded-2xl p-4 border border-rose-800/40 flex flex-col gap-3">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-2.5">
@@ -248,7 +251,7 @@ HTML_PAGE = """<!DOCTYPE html>
           </div>
           <div>
             <h2 class="text-xs font-semibold text-rose-100">Upload SRT / Video / Audio</h2>
-            <p class="text-[10px] text-rose-400">Total Subtitles: <span id="subCount" class="font-bold text-pink-300">0</span> items</p>
+            <p class="text-[10px] text-rose-400">Total: <span id="subCount" class="font-bold text-pink-300">0</span> items</p>
           </div>
         </div>
         
@@ -261,7 +264,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="pt-3 border-t border-rose-900/60 grid grid-cols-1 md:grid-cols-2 gap-2.5">
         <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">Target Language</label>
-          <select id="targetLang" onchange="handleLangChange()" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none">
+          <select id="targetLang" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none">
             <option value="Burmese">မြန်မာစာ (Burmese)</option>
             <option value="English">English</option>
             <option value="Thai">ภาษาไทย (Thai)</option>
@@ -269,10 +272,10 @@ HTML_PAGE = """<!DOCTYPE html>
           </select>
         </div>
 
-        <div id="toneContainer">
+        <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">စကားပြောပုံစံ / အသုံးအနှုန်းဟန်</label>
           <select id="toneStyle" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none">
-            <option value="natural">🗣️ သဘာဝကျ စကားပြောဟန်</option>
+            <option value="natural">🗣️ သဘာဝကျ စကားပြောဟန် (ရုပ်ရှင်/ဇာတ်လမ်း)</option>
             <option value="formal">📖 စာဟန်ပေဟန် (ယဉ်ကျေး/တရားဝင်)</option>
             <option value="explaining">🎓 ရှင်းပြသလိုဟန် (နားလည်လွယ်)</option>
             <option value="casual">🎭 ပေါ့ပေါ့ပါးပါး လူငယ်သုံး</option>
@@ -295,7 +298,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- Sticky Bottom Controls -->
   <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex flex-col gap-2 max-w-lg mx-auto md:max-w-xl">
     <div class="flex items-center justify-between text-xs px-1">
-      <span class="text-[11px] text-rose-300 font-medium">Translate Engine:</span>
+      <span class="text-[11px] text-rose-300 font-medium">Engine:</span>
       <div class="flex items-center gap-2">
         <label class="flex items-center gap-1.5 cursor-pointer">
           <input type="radio" name="transEngine" value="gemini" checked onchange="saveActiveEngine('gemini')" class="accent-rose-500">
@@ -310,40 +313,26 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
-      <button onclick="translateAllSafe()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
+      <button onclick="startTranslation()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
         </svg>
         <span>Translate All</span>
       </button>
 
-      <button onclick="downloadOriginalSRT()" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+      <button onclick="downloadOriginalSRT()" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl transition active:scale-[0.98]">
         <span>Original .SRT</span>
       </button>
 
-      <button onclick="downloadTranslatedSRT()" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+      <button onclick="downloadTranslatedSRT()" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl transition active:scale-[0.98]">
         <span>Translated .SRT</span>
       </button>
     </div>
   </footer>
 
-  <!-- Alert Modal -->
-  <div id="customAlertModal" class="fixed inset-0 bg-black/70 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
-    <div class="bg-rose-950 border border-rose-700/70 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4 romantic-card text-center">
-      <div class="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 mx-auto flex items-center justify-center text-xl shadow">✨</div>
-      <div>
-        <h3 id="customAlertTitle" class="text-sm font-bold text-white mb-1.5">သတိပေးချက်</h3>
-        <p id="customAlertMessage" class="text-xs text-rose-200/90 leading-relaxed"></p>
-      </div>
-      <button onclick="closeCustomAlert()" class="w-full bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 text-white font-semibold py-2.5 rounded-xl text-xs shadow transition active:scale-95">
-        နားလည်ပါပြီ
-      </button>
-    </div>
-  </div>
-
-  <!-- Right Drawer Menu -->
+  <!-- Drawer Menu -->
   <div id="menuOverlay" onclick="toggleMenu(false)" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden transition-opacity"></div>
-  <aside id="menuDrawer" class="fixed top-0 right-0 bottom-0 w-80 max-w-[85vw] bg-rose-950 border-l border-rose-800/60 z-50 transform translate-x-full drawer-transition flex flex-col p-5 shadow-2xl">
+  <aside id="menuDrawer" class="fixed top-0 right-0 bottom-0 w-80 max-w-[85vw] bg-rose-950 border-l border-rose-800/60 z-50 transform translate-x-full transition-transform duration-300 flex flex-col p-5 shadow-2xl">
     <div class="flex items-center justify-between border-b border-rose-900/60 pb-4 mb-4">
       <div class="flex items-center gap-2">
         <span class="text-rose-400 font-bold text-lg">☰</span>
@@ -363,27 +352,6 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <span class="text-rose-400 font-bold">➔</span>
       </button>
-
-      <div class="romantic-card rounded-2xl p-4 border border-rose-900/60 space-y-3">
-        <div class="flex items-center gap-2 text-rose-300 font-semibold border-b border-rose-900/60 pb-2">
-          <span>🔑</span>
-          <span>API Key ယူနည်း</span>
-        </div>
-
-        <div class="space-y-1.5">
-          <a href="https://console.groq.com/keys" target="_blank" class="block font-bold text-pink-300 hover:underline flex items-center justify-between bg-rose-900/30 p-2 rounded-lg border border-rose-800/40">
-            <span>👉 Groq API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Console</span>
-          </a>
-        </div>
-
-        <div class="border-t border-rose-900/40 pt-2 space-y-1.5">
-          <a href="https://aistudio.google.com/app/apikey" target="_blank" class="block font-bold text-indigo-300 hover:underline flex items-center justify-between bg-indigo-950/40 p-2 rounded-lg border border-indigo-800/40">
-            <span>👉 Gemini API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">AI Studio</span>
-          </a>
-        </div>
-      </div>
     </div>
   </aside>
 
@@ -392,25 +360,25 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4">
       <div class="flex items-center justify-between border-b border-rose-900/80 pb-2.5">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <span>⚙</span> API & Model Settings
+          <span>⚙</span> API Settings
         </h3>
         <button onclick="closeSettingsModal()" class="text-rose-400 hover:text-white text-base">✕</button>
       </div>
 
       <div class="space-y-3 text-xs">
         <div>
-          <label class="block text-[11px] font-medium text-pink-300 mb-1">Groq API Key (Whisper STT)</label>
+          <label class="block text-[11px] font-medium text-pink-300 mb-1">Groq API Key (Whisper Turbo)</label>
           <input id="modalGroqKey" type="password" placeholder="gsk_..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
 
         <div>
-          <label class="block text-[11px] font-medium text-indigo-300 mb-1">Gemini API Key (Subtitle Translate)</label>
+          <label class="block text-[11px] font-medium text-indigo-300 mb-1">Gemini API Key</label>
           <input id="modalGeminiKey" type="password" placeholder="AIzaSy..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
 
         <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">Gemini Model Name</label>
-          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none" placeholder="e.g. gemini-3.5-flash">
+          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
       </div>
 
@@ -424,6 +392,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <script>
     let subtitles = [];
+    let isTranslating = false;
+    let uploadedFileName = "subtitles";
 
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
@@ -431,6 +401,11 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
 
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
@@ -443,15 +418,11 @@ HTML_PAGE = """<!DOCTYPE html>
       const radio = document.querySelector(`input[name="transEngine"][value="${engine}"]`);
       if (radio) radio.checked = true;
 
+      // Video subtitle sync
       const vid = document.getElementById('videoElement');
       vid.addEventListener('timeupdate', () => {
         const t = vid.currentTime;
-        const active = subtitles.find(s => {
-          const start = toSeconds(s.startTime);
-          const end = toSeconds(s.endTime);
-          return t >= start && t <= end;
-        });
-
+        const active = subtitles.find(s => t >= s.startSec && t <= s.endSec);
         const box = document.getElementById('liveSubtitleBox');
         const txt = document.getElementById('liveSubtitleText');
         if (active) {
@@ -481,10 +452,10 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function adjustTimestamp(idx, deltaSec) {
       const s = subtitles[idx];
-      const newStart = Math.max(0, toSeconds(s.startTime) + deltaSec);
-      const newEnd = Math.max(0, toSeconds(s.endTime) + deltaSec);
-      s.startTime = fromSeconds(newStart);
-      s.endTime = fromSeconds(newEnd);
+      s.startSec = Math.max(0, s.startSec + deltaSec);
+      s.endSec = Math.max(0, s.endSec + deltaSec);
+      s.startTime = fromSeconds(s.startSec);
+      s.endTime = fromSeconds(s.endSec);
       renderList();
     }
 
@@ -505,67 +476,7 @@ HTML_PAGE = """<!DOCTYPE html>
         }
       });
       renderList();
-      showCustomAlert(`စာလုံးပေါင်း (${count}) နေရာကို အောင်မြင်စွာ အစားထိုးပြီးပါပြီ!`, "Find & Replace Complete");
-    }
-
-    async function retranslateSingle(idx) {
-      const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
-      const groqKey = localStorage.getItem(KEY_GROQ) || '';
-      const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const geminiModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash';
-      const apiKey = (selectedEngine === 'gemini') ? geminiKey : groqKey;
-      const modelName = (selectedEngine === 'gemini') ? geminiModel : 'llama-3.3-70b-versatile';
-
-      if (!apiKey) {
-        showCustomAlert("API Key အရင်ထည့်ပေးပါ");
-        return;
-      }
-
-      setStatus(`စာကြောင်း #${subtitles[idx].id} ကို AI ပြန်ဆိုနေပါသည်...`);
-      try {
-        const res = await fetch('/api/translate', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            subtitles: [{ id: subtitles[idx].id, originalText: subtitles[idx].originalText }],
-            targetLang: document.getElementById('targetLang').value,
-            toneStyle: document.getElementById('toneStyle').value,
-            provider: selectedEngine,
-            modelName: modelName,
-            apiKey: apiKey
-          })
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-
-        if (data.translations && data.translations.length > 0) {
-          subtitles[idx].translatedText = data.translations[0].translatedText;
-          renderList();
-          setStatus("Re-translation ပြီးပါပြီ!", 2500);
-        }
-      } catch(err) {
-        showCustomAlert("Error: " + err.message);
-        clearStatus();
-      }
-    }
-
-    function showCustomAlert(msg, title = "သတိပေးချက်") {
-      document.getElementById('customAlertTitle').innerText = title;
-      document.getElementById('customAlertMessage').innerText = msg;
-      document.getElementById('customAlertModal').classList.remove('hidden');
-    }
-
-    function closeCustomAlert() {
-      document.getElementById('customAlertModal').classList.add('hidden');
-    }
-
-    function handleLangChange() {
-      const lang = document.getElementById('targetLang').value;
-      document.getElementById('toneContainer').style.display = (lang === 'Burmese') ? 'block' : 'none';
-    }
-
-    function saveActiveEngine(engine) {
-      localStorage.setItem(KEY_TRANS_ENGINE, engine);
+      alert(`စာလုံးပေါင်း (${count}) နေရာကို အစားထိုးပြီးပါပြီ!`);
     }
 
     function toggleMenu(show) {
@@ -580,13 +491,8 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
-    function openSettingsModal() {
-      document.getElementById('settingsModal').classList.remove('hidden');
-    }
-
-    function closeSettingsModal() {
-      document.getElementById('settingsModal').classList.add('hidden');
-    }
+    function openSettingsModal() { document.getElementById('settingsModal').classList.remove('hidden'); }
+    function closeSettingsModal() { document.getElementById('settingsModal').classList.add('hidden'); }
 
     function saveSettings() {
       const gKey = document.getElementById('modalGroqKey').value.trim();
@@ -596,10 +502,9 @@ HTML_PAGE = """<!DOCTYPE html>
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
       localStorage.setItem(KEY_GEMINI_MODEL, gmModel);
-
       document.getElementById('radioGeminiLabel').innerText = gmModel;
       closeSettingsModal();
-      setStatus("Settings မှတ်သားပြီးပါပြီ!", 3000);
+      setStatus("Settings သိမ်းဆည်းပြီးပါပြီ!", 3000);
     }
 
     function setStatus(text, duration = 0) {
@@ -609,35 +514,36 @@ HTML_PAGE = """<!DOCTYPE html>
       if (duration > 0) setTimeout(() => pill.classList.add('hidden'), duration);
     }
 
-    function clearStatus() {
-      document.getElementById('statusPill').classList.add('hidden');
+    function updateProgress(done, total) {
+      const pContainer = document.getElementById('progressContainer');
+      pContainer.classList.remove('hidden');
+      const pct = Math.round((done / total) * 100);
+      document.getElementById('progressBar').style.width = `${pct}%`;
+      document.getElementById('progressText').innerText = `${pct}%`;
+      document.getElementById('progressCount').innerText = `${done} / ${total}`;
+      if (done >= total) setTimeout(() => pContainer.classList.add('hidden'), 3000);
     }
 
     document.getElementById('fileInput').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
+      uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
       if (['mp4', 'mov', 'webm'].includes(ext)) {
-        const vidUrl = URL.createObjectURL(file);
-        const vid = document.getElementById('videoElement');
-        vid.src = vidUrl;
+        document.getElementById('videoElement').src = URL.createObjectURL(file);
         document.getElementById('videoContainer').classList.remove('hidden');
       }
 
       if (ext === 'srt') {
         const txt = await file.text();
         parseSRT(txt);
-        setStatus("SRT file loaded!", 3000);
       } else {
         const groqKey = localStorage.getItem(KEY_GROQ);
-        if (!groqKey) {
-          showCustomAlert('Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Settings တွင် Key ထည့်သွင်းပေးပါခင်ဗျာ။');
-          return;
-        }
+        if (!groqKey) return alert("Groq API Key အရင်ထည့်ပေးပါ");
 
-        setStatus("Groq Whisper ဖြင့် မူရင်းစာတန်းထိုး ထုတ်ယူနေပါသည် (ခဏစောင့်ပါ)...");
+        setStatus("Groq Whisper Turbo ဖြင့် Transcribe လုပ်နေပါသည်...");
         const fd = new FormData();
         fd.append('file', file);
         fd.append('apiKey', groqKey);
@@ -646,30 +552,35 @@ HTML_PAGE = """<!DOCTYPE html>
           const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          subtitles = data.subtitles;
+          subtitles = data.subtitles.map(s => ({
+            ...s,
+            startSec: toSeconds(s.startTime),
+            endSec: toSeconds(s.endTime)
+          }));
           renderList();
-          setStatus("Original Subtitles ထုတ်ယူပြီးပါပြီ!", 3000);
+          setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
         } catch(err) {
-          showCustomAlert(err.message, "Transcription Error");
-          clearStatus();
+          alert("Error: " + err.message);
         }
       }
     });
 
     function parseSRT(txt) {
-      const blocks = txt.trim().replace(/\\r\\n/g, '\\n').split(/\\n\\s*\\n/);
+      const blocks = txt.trim().replace(/\r\n/g, '\n').split(/\n\s*\n/);
       subtitles = [];
       blocks.forEach((b, i) => {
-        const l = b.trim().split('\\n');
+        const l = b.trim().split('\n');
         if (l.length >= 2) {
-          const tIdx = /^\\d+$/.test(l[0].trim()) ? 1 : 0;
+          const tIdx = /^\d+$/.test(l[0].trim()) ? 1 : 0;
           if (l[tIdx] && l[tIdx].includes('-->')) {
             const [s, e] = l[tIdx].split('-->').map(x => x.trim());
             subtitles.push({
               id: i + 1,
               startTime: s,
               endTime: e,
-              originalText: l.slice(tIdx + 1).join('\\n'),
+              startSec: toSeconds(s),
+              endSec: toSeconds(e),
+              originalText: l.slice(tIdx + 1).join('\n'),
               translatedText: ''
             });
           }
@@ -683,46 +594,36 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('subCount').innerText = subtitles.length;
 
       if (!subtitles.length) {
-        box.innerHTML = `
-          <div class="romantic-card rounded-2xl p-10 text-center border border-rose-900/40 text-rose-300/80 my-2">
-            <h3 class="text-sm font-semibold text-rose-100 mb-1">No Subtitles Loaded</h3>
-            <p class="text-xs text-rose-400/80">Choose File နှိပ်၍ SRT ဖိုင် သို့မဟုတ် ဗီဒီယို/အသံဖိုင် တင်ပါ</p>
-          </div>`;
+        box.innerHTML = '<div class="romantic-card rounded-2xl p-10 text-center text-rose-300/80">No Subtitles Loaded</div>';
         return;
       }
 
       box.innerHTML = subtitles.map((s, idx) => `
-        <div class="romantic-card rounded-2xl p-3.5 border border-rose-900/30 shadow-sm transition hover:border-rose-700/50">
+        <div class="romantic-card rounded-2xl p-3.5 border border-rose-900/30">
           <div class="flex items-center justify-between text-[10px] font-mono text-rose-300/80 border-b border-rose-900/30 pb-1.5 mb-2">
-            <div class="flex items-center gap-1.5">
-              <span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-300 font-semibold">#${s.id}</span>
-              <span>${s.startTime.split(',')[0]} ➔ ${s.endTime.split(',')[0]}</span>
-            </div>
-            <div class="flex items-center gap-1">
-              <button onclick="adjustTimestamp(${idx}, -0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800 hover:text-white" title="-0.5s">-0.5s</button>
-              <button onclick="adjustTimestamp(${idx}, 0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800 hover:text-white" title="+0.5s">+0.5s</button>
+            <span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-300 font-semibold">#${s.id}</span>
+            <span>${s.startTime.split(',')[0]} ➔ ${s.endTime.split(',')[0]}</span>
+            <div class="flex gap-1">
+              <button onclick="adjustTimestamp(${idx}, -0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800">-0.5s</button>
+              <button onclick="adjustTimestamp(${idx}, 0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800">+0.5s</button>
             </div>
           </div>
-          
-          <div class="text-xs text-rose-200/90 mb-2 leading-relaxed flex justify-between gap-2">
-            <span>${s.originalText}</span>
-            <button onclick="retranslateSingle(${idx})" class="text-[11px] text-pink-400 hover:text-pink-300 p-1" title="AI ဖြင့် ပြန်ဆိုမည်">🔄</button>
-          </div>
-
-          <div>
-            <textarea 
-              placeholder="ဘာသာပြန်စာသား..."
-              onchange="subtitles[${idx}].translatedText = this.value"
-              rows="2"
-              class="w-full bg-rose-950/80 border border-rose-800/50 focus:border-rose-400 rounded-xl p-2 text-xs text-rose-50 placeholder-rose-400/40 focus:outline-none resize-none leading-relaxed"
-            >${s.translatedText}</textarea>
-          </div>
+          <div class="text-xs text-rose-200/90 mb-2 leading-relaxed">${escapeHtml(s.originalText)}</div>
+          <textarea rows="2" class="w-full bg-rose-950/80 border border-rose-800/50 rounded-xl p-2 text-xs text-rose-50 resize-none focus:outline-none"
+            onchange="subtitles[${idx}].translatedText = this.value">${escapeHtml(s.translatedText)}</textarea>
         </div>
       `).join('');
     }
 
-    // SAFE & RESILIENT TRANSLATION (Auto Resume + Quota Safe)
-    async function translateAllSafe() {
+    function stopTranslation() {
+      isTranslating = false;
+      document.getElementById('btnStop').classList.add('hidden');
+      setStatus("ဘာသာပြန်ဆိုမှုကို ရပ်တန့်လိုက်ပါပြီ", 3000);
+    }
+
+    // PARALLEL + RESUME TRANSLATION PIPELINE
+    async function startTranslation() {
+      if (isTranslating) return;
       const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
       const groqKey = localStorage.getItem(KEY_GROQ) || '';
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
@@ -731,111 +632,96 @@ HTML_PAGE = """<!DOCTYPE html>
       const apiKey = (selectedEngine === 'gemini') ? geminiKey : groqKey;
       const modelName = (selectedEngine === 'gemini') ? geminiModel : 'llama-3.3-70b-versatile';
 
-      if (!apiKey) {
-        showCustomAlert(`${selectedEngine.toUpperCase()} API Key မရှိသေးပါ။ Settings တွင် ထည့်သွင်းပေးပါခင်ဗျာ။`);
-        return;
-      }
-      if (!subtitles.length) {
-        showCustomAlert("ဘာသာပြန်ရန် Subtitle မရှိသေးပါ");
-        return;
-      }
+      if (!apiKey) return alert("API Key ထည့်သွင်းပေးပါ");
+      if (!subtitles.length) return alert("Subtitle မရှိသေးပါ");
 
-      // Chunk Size 45 (Request အကြိမ်ရေ အနည်းဆုံးဖြစ်အောင် ချိန်ညှိထားခြင်း)
-      const chunkSize = 45;
-      const targetLang = document.getElementById('targetLang').value;
-      const toneStyle = document.getElementById('toneStyle').value;
+      const pending = subtitles.filter(s => !s.translatedText);
+      if (!pending.length) return alert("စာကြောင်းအားလုံး ဘာသာပြန်ပြီးပါပြီ");
 
-      // ဘာသာမပြန်ရသေးသော အကြောင်းများကိုသာ စစ်ဆေးလုပ်ဆောင်မည်
-      const remainingItems = subtitles.filter(s => !s.translatedText);
-      if (remainingItems.length === 0) {
-        showCustomAlert("စာကြောင်းများ အားလုံး ဘာသာပြန်ပြီးသား ဖြစ်ပါသည်");
-        return;
+      isTranslating = true;
+      document.getElementById('btnStop').classList.remove('hidden');
+
+      const chunkSize = 35; // Balanced chunk
+      const chunks = [];
+      for (let i = 0; i < pending.length; i += chunkSize) {
+        chunks.push(pending.slice(i, i + chunkSize));
       }
 
-      for (let i = 0; i < remainingItems.length; i += chunkSize) {
-        const chunk = remainingItems.slice(i, i + chunkSize);
-        setStatus(`ဘာသာပြန်နေပါသည်: စာကြောင်း ${chunk[0].id} မှ ${chunk[chunk.length - 1].id} အထိ...`);
+      let completedCount = subtitles.length - pending.length;
+      updateProgress(completedCount, subtitles.length);
 
-        let success = false;
-        let attempt = 0;
+      const concurrency = 2; // Parallel 2 Batches
+      for (let i = 0; i < chunks.length; i += concurrency) {
+        if (!isTranslating) break;
+        const currentBatches = chunks.slice(i, i + concurrency);
 
-        while (!success && attempt < 5) {
-          try {
-            const res = await fetch('/api/translate', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({
-                subtitles: chunk,
-                targetLang: targetLang,
-                toneStyle: toneStyle,
-                provider: selectedEngine,
-                modelName: modelName,
-                apiKey: apiKey
-              })
-            });
+        setStatus(`Parallel Translation လုပ်ဆောင်နေပါသည် (Batch ${Math.floor(i/concurrency) + 1}/${Math.ceil(chunks.length/concurrency)})...`);
 
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
+        await Promise.all(currentBatches.map(async (chunk) => {
+          let success = false;
+          let retries = 0;
+          while (!success && retries < 4 && isTranslating) {
+            try {
+              const res = await fetch('/api/translate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  subtitles: chunk,
+                  targetLang: document.getElementById('targetLang').value,
+                  toneStyle: document.getElementById('toneStyle').value,
+                  provider: selectedEngine,
+                  modelName: modelName,
+                  apiKey: apiKey
+                })
+              });
+              const data = await res.json();
+              if (!res.ok || data.error) throw new Error(data.error || "Request failed");
 
-            data.translations.forEach(t => {
-              const item = subtitles.find(x => x.id === t.id);
-              if (item) item.translatedText = t.translatedText;
-            });
-
-            renderList();
-            success = true;
-            await sleep(2000); // Request တစ်ခုပြီးတိုင်း ၂ စက္ကန့် pause ပေးခြင်း
-
-          } catch(err) {
-            attempt++;
-            const errMsg = err.message || "";
-            // Quota limit သို့မဟုတ် High demand ဖြစ်ပါက Google ကန့်သတ်ချက်ကျော်လွန်အောင် စောင့်ပေးခြင်း
-            let waitSeconds = 5;
-            const matchWait = errMsg.match(/retry in ([0-9.]+)s/);
-            if (matchWait && matchWait[1]) {
-              waitSeconds = Math.ceil(parseFloat(matchWait[1])) + 2;
-            }
-
-            if (attempt < 5) {
-              setStatus(`Rate Limit ကျော်လွန်ရန် ${waitSeconds} စက္ကန့် ခေတ္တနားပြီး အလိုအလျောက် ဆက်လုပ်ပါမည် (${attempt}/5)...`);
-              await sleep(waitSeconds * 1000);
-            } else {
-              showCustomAlert(`Error ဖြစ်ပေါ်ခဲ့ပါသည်- ${err.message}\nကျန်ရှိသော အကြောင်းများကို ထပ်မံနှိပ်၍ ဆက်လက်ဘာသာပြန်နိုင်ပါသည်`, "ခေတ္တရပ်နားပါသည်");
-              clearStatus();
-              return;
+              if (Array.isArray(data.translations)) {
+                data.translations.forEach(t => {
+                  const item = subtitles.find(x => x.id === t.id);
+                  if (item) item.translatedText = t.translatedText;
+                });
+                completedCount += chunk.length;
+                updateProgress(completedCount, subtitles.length);
+              }
+              success = true;
+            } catch(e) {
+              retries++;
+              const waitSec = retries * 3; // Exponential Backoff
+              setStatus(`Server အခြေအနေကြောင့် ${waitSec} စက္ကန့် စောင့်နေပါသည် (${retries}/4)...`);
+              await sleep(waitSec * 1000);
             }
           }
-        }
+        }));
+
+        renderList();
       }
 
-      setStatus("စာကြောင်းအားလုံး ဘာသာပြန်ဆိုပြီးပါပြီ!", 4000);
+      isTranslating = false;
+      document.getElementById('btnStop').classList.add('hidden');
+      setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
     }
 
     function downloadOriginalSRT() {
-      if (!subtitles.length) return showCustomAlert("Subtitle မရှိသေးပါ");
-      let out = "";
-      subtitles.forEach((s, i) => {
-        out += `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.originalText}\\n\\n`;
-      });
-      const blob = new Blob([out], { type: 'text/plain;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = "original_subtitles.srt";
-      a.click();
+      if (!subtitles.length) return;
+      let out = subtitles.map((s, i) => `${i + 1}\n${s.startTime} --> ${s.endTime}\n${s.originalText}\n`).join('\n');
+      triggerDownload(out, `${uploadedFileName}_original.srt`);
     }
 
     function downloadTranslatedSRT() {
-      if (!subtitles.length) return showCustomAlert("Subtitle မရှိသေးပါ");
-      let out = "";
-      subtitles.forEach((s, i) => {
-        const text = s.translatedText || s.originalText;
-        out += `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${text}\\n\\n`;
-      });
-      const blob = new Blob([out], { type: 'text/plain;charset=utf-8' });
+      if (!subtitles.length) return;
+      let out = subtitles.map((s, i) => `${i + 1}\n${s.startTime} --> ${s.endTime}\n${s.translatedText || s.originalText}\n`).join('\n');
+      triggerDownload(out, `${uploadedFileName}_translated.srt`);
+    }
+
+    function triggerDownload(content, filename) {
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = "translated_subtitles.srt";
+      a.download = filename;
       a.click();
+      URL.revokeObjectURL(a.href);
     }
   </script>
 </body>
@@ -844,7 +730,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_PAGE)
+    return Response(HTML_PAGE, mimetype='text/html')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
