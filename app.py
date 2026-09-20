@@ -7,17 +7,18 @@ from flask import Flask, request, jsonify, Response
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 
-def clean_json_string(text: str) -> str:
-    text = text.strip()
-    if text.startswith('```'):
-        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\s*```$', '', text)
-    return text.strip()
+def clean_json_text(text: str) -> str:
+    """Markdown code fences (```json ... ```) များကို ဖယ်ရှားပေးသည့် function"""
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+        t = re.sub(r"\s*```$", "", t)
+    return t.strip()
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
     file = request.files.get('file')
-    api_key = request.form.get('apiKey')
+    api_key = request.form.get('apiKey', '').strip()
     if not file or not api_key:
         return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
 
@@ -26,13 +27,9 @@ def transcribe():
         data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         
-        res = requests.post(
-            '[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)',
-            headers=headers,
-            files=files,
-            data=data,
-            timeout=180
-        )
+        # Pure clean Groq endpoint
+        groq_url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
+        res = requests.post(groq_url, headers=headers, files=files, data=data, timeout=180)
         
         if res.status_code != 200:
             err_msg = res.json().get('error', {}).get('message', f'Groq Error ({res.status_code})')
@@ -66,13 +63,18 @@ def translate():
     target_lang = req.get('targetLang', 'Burmese')
     tone_style = req.get('toneStyle', 'natural')
     api_key = req.get('apiKey', '').strip()
-    model_name = req.get('modelName', 'gemini-3.5-flash-lite').strip()
+    raw_model = req.get('modelName', 'gemini-3.5-flash-lite').strip()
 
     if not api_key:
         return jsonify({"error": "Gemini API Key လိုအပ်ပါသည်"}), 400
 
     if not subtitles:
         return jsonify({"error": "ဘာသာပြန်ရန် စာတန်းထိုး မရှိပါ"}), 400
+
+    # Model ID သန့်စင်ခြင်း
+    model_id = re.sub(r'[^a-zA-Z0-9\-\.]', '', raw_model)
+    if not model_id:
+        model_id = 'gemini-3.5-flash-lite'
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie subtitles (သဘာဝကျကျ စကားပြောဟန်)',
@@ -92,13 +94,9 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        # Markdown link တွေရောပါလာရင် ဖယ်ရှားပြီး model id သန့်သန့်ယူခြင်း
-        clean_model = re.sub(r'\[.*?\]\(.*?\)', '', model_name)
-        clean_model = clean_model.replace('models/', '').strip()
-        
-        # 100% Valid Google REST API URL
-        url = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)" + clean_model + ":generateContent"
-        
+        # STRICT raw URL string construction (No Markdown, No brackets)
+        gemini_endpoint = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_id}:generateContent"
+
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key
@@ -118,9 +116,9 @@ def translate():
                 "temperature": 0.25
             }
         }
-        
-        res = requests.post(url, headers=headers, json=body, timeout=60)
-        
+
+        res = requests.post(gemini_endpoint, headers=headers, json=body, timeout=60)
+
         if res.status_code != 200:
             try:
                 err_data = res.json().get('error', {})
@@ -128,20 +126,21 @@ def translate():
             except Exception:
                 err_msg = f'Gemini Error ({res.status_code})'
             return jsonify({"error": err_msg}), res.status_code
-        
+
         res_json = res.json()
         candidates = res_json.get('candidates', [])
         if not candidates or 'content' not in candidates[0]:
-            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Filter သို့မဟုတ် Quota Limit ကြောင့်ဖြစ်နိုင်သည်)"}), 400
+            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Quota ပြည့်ခြင်း သို့မဟုတ် Filter ကြောင့်ဖြစ်နိုင်သည်)"}), 400
 
         raw_text = candidates[0]['content']['parts'][0]['text']
-        cleaned_json = clean_json_string(raw_text)
+        cleaned_json = clean_json_text(raw_text)
         translations = json.loads(cleaned_json)
 
         if isinstance(translations, dict):
             translations = translations.get('translations', translations.get('subtitles', []))
 
         return jsonify({"translations": translations if isinstance(translations, list) else []})
+
     except requests.exceptions.Timeout:
         return jsonify({"error": "Server Timeout ဖြစ်သွားပါသည် (Block Size ကို လျှော့ပေးပါ)"}), 504
     except json.JSONDecodeError:
@@ -163,7 +162,7 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       min-height: 100vh;
-      padding-bottom: 95px;
+      padding-bottom: 100px;
       overflow-x: hidden;
     }
     header {
@@ -227,12 +226,10 @@ HTML_PAGE = """<!DOCTYPE html>
     .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #e11d48, #ec4899); transition: width 0.3s; }
     .progress-text { display: flex; justify-content: space-between; font-size: 10px; color: #f472b6; margin-top: 4px; }
     
-    /* Fixed Status Pill so Stop button NEVER overflows */
     #statusPill {
       display: none; background: rgba(54, 14, 38, 0.95); border: 1px solid rgba(244, 114, 182, 0.35);
-      border-radius: 14px; padding: 10px 12px; font-size: 11px; color: #fbcfe8;
-      align-items: center; justify-content: space-between; gap: 10px;
-      width: 100%; overflow: hidden;
+      border-radius: 14px; padding: 10px 14px; font-size: 11px; color: #fbcfe8;
+      align-items: center; justify-content: space-between; gap: 10px; width: 100%;
     }
     #statusText {
       flex: 1; min-width: 0; word-break: break-word; overflow-wrap: anywhere; line-height: 1.4;
@@ -314,7 +311,7 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Status Banner with Guaranteed Fixed Layout -->
+    <!-- Status Banner -->
     <div id="statusPill">
       <span id="statusText">Ready</span>
       <button id="btnStop" class="btn-stop" onclick="stopTranslation()" style="display:none;">Stop ⏹</button>
@@ -453,16 +450,14 @@ HTML_PAGE = """<!DOCTYPE html>
       <div style="display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.5; color: #fbcfe8;">
         <div class="card" style="background: rgba(225,29,72,0.1);">
           <div style="font-weight: bold; color: #fff; margin-bottom: 4px;">၁။ Gemini API Key (အခမဲ့)</div>
-          <p>• <b>aistudio.google.com</b> သို့ Gmail ဖြင့် Sign in ဝင်ပါ<br>
-             • <b>Create API key</b> ကို နှိပ်ပြီး ရလာသော Key ကို ထည့်ပါ</p>
-          <a href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" style="display:inline-block; margin-top:6px; color:#f472b6; font-weight:bold;">Google AI Studio သို့ သွားရန် ➔</a>
+          <p>• aistudio.google.com သို့ Gmail ဖြင့် Sign in ဝင်ပါ<br>
+             • Create API key ကို နှိပ်ပြီး ရလာသော Key ကို ထည့်ပါ</p>
         </div>
 
         <div class="card" style="background: rgba(225,29,72,0.1);">
           <div style="font-weight: bold; color: #fff; margin-bottom: 4px;">၂။ Groq API Key (အသံဖိုင်အတွက်)</div>
-          <p>• <b>console.groq.com</b> တွင် အကောင့်ဖွင့်ပါ<br>
-             • <b>API Keys</b> ထဲမှ အခမဲ့ ရယူနိုင်ပါသည်</p>
-          <a href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" style="display:inline-block; margin-top:6px; color:#f472b6; font-weight:bold;">Groq Console သို့ သွားရန် ➔</a>
+          <p>• console.groq.com တွင် အကောင့်ဖွင့်ပါ<br>
+             • API Keys ထဲမှ အခမဲ့ ရယူနိုင်ပါသည်</p>
         </div>
 
         <button class="btn-export" onclick="closeGuideModal()" style="width: 100%;">နားလည်ပါပြီ</button>
@@ -641,8 +636,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
     async function startTranslation() {
       if (isTranslating) return;
-      const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const modelName = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
+      const geminiKey = (localStorage.getItem(KEY_GEMINI) || '').trim();
+      const modelName = (localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite').trim();
       const chunkSize = parseInt(localStorage.getItem(KEY_BLOCK_SIZE) || '25', 10);
       const cooldownSec = parseInt(localStorage.getItem(KEY_DELAY_SEC) || '15', 10);
 
@@ -666,7 +661,7 @@ HTML_PAGE = """<!DOCTYPE html>
         if (!isTranslating) break;
         const chunk = pending.slice(i, i + chunkSize);
 
-        setStatus(`[${modelName}] ဘာသာပြန်နေပါသည်: #${chunk[0].id} မှ #${chunk[chunk.length - 1].id} (စာကြောင်း ${chunk.length} ကြောင်း)...`);
+        setStatus(`[${modelName}] ဘာသာပြန်နေပါသည်: #${chunk[0].id} မှ #${chunk[chunk.length - 1].id}...`);
 
         let success = false;
         let retries = 0;
@@ -722,7 +717,6 @@ HTML_PAGE = """<!DOCTYPE html>
           } catch(e) {
             retries++;
             const waitSec = retries * 8;
-            // Short clean error message so it never stretches the UI
             const shortErr = e.message.length > 50 ? e.message.substring(0, 50) + "..." : e.message;
             setStatus(`Warning: ${shortErr} — ${waitSec}s အကြာတွင် ပြန်လည်ကြိုးစားပါမည် (${retries}/3)...`);
             await sleep(waitSec * 1000);
