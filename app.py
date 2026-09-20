@@ -5,10 +5,11 @@ import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
+# 100MB File upload limit
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  
 
-def clean_json_text(text: str) -> str:
-    """Markdown code fences (```json ... ```) များကို ဖယ်ရှားပေးသည့် function"""
+def strip_markdown_fences(text: str) -> str:
+    """LLM ပြန်ပို့သော JSON မှ ```json code fences များကို သန့်စင်ပေးသည့် helper"""
     t = text.strip()
     if t.startswith("```"):
         t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
@@ -27,9 +28,9 @@ def transcribe():
         data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         
-        # Pure clean Groq endpoint
-        groq_url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
-        res = requests.post(groq_url, headers=headers, files=files, data=data, timeout=180)
+        # Pure Groq Whisper Endpoint
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        res = requests.post(url, headers=headers, files=files, data=data, timeout=180)
         
         if res.status_code != 200:
             err_msg = res.json().get('error', {}).get('message', f'Groq Error ({res.status_code})')
@@ -71,7 +72,7 @@ def translate():
     if not subtitles:
         return jsonify({"error": "ဘာသာပြန်ရန် စာတန်းထိုး မရှိပါ"}), 400
 
-    # Model ID သန့်စင်ခြင်း
+    # Model ID စစ်ဆေးသန့်စင်ခြင်း
     model_id = re.sub(r'[^a-zA-Z0-9\-\.]', '', raw_model)
     if not model_id:
         model_id = 'gemini-3.5-flash-lite'
@@ -94,9 +95,9 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        # STRICT raw URL string construction (No Markdown, No brackets)
-        gemini_endpoint = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model_id}:generateContent"
-
+        # Standard Clean Gemini Endpoint
+        endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model_id + ":generateContent"
+        
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key
@@ -117,7 +118,7 @@ def translate():
             }
         }
 
-        res = requests.post(gemini_endpoint, headers=headers, json=body, timeout=60)
+        res = requests.post(endpoint, headers=headers, json=body, timeout=60)
 
         if res.status_code != 200:
             try:
@@ -130,10 +131,10 @@ def translate():
         res_json = res.json()
         candidates = res_json.get('candidates', [])
         if not candidates or 'content' not in candidates[0]:
-            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Quota ပြည့်ခြင်း သို့မဟုတ် Filter ကြောင့်ဖြစ်နိုင်သည်)"}), 400
+            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Filter သို့မဟုတ် Quota Limit ကြောင့်ဖြစ်နိုင်သည်)"}), 400
 
         raw_text = candidates[0]['content']['parts'][0]['text']
-        cleaned_json = clean_json_text(raw_text)
+        cleaned_json = strip_markdown_fences(raw_text)
         translations = json.loads(cleaned_json)
 
         if isinstance(translations, dict):
@@ -284,7 +285,6 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body>
 
-  <!-- Header -->
   <header>
     <div class="brand">
       <div class="brand-icon">❤</div>
@@ -300,7 +300,6 @@ HTML_PAGE = """<!DOCTYPE html>
   </header>
 
   <div class="container">
-    <!-- Progress Bar -->
     <div id="progressContainer">
       <div class="progress-bar-bg">
         <div id="progressBar" class="progress-bar-fill"></div>
@@ -311,13 +310,11 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Status Banner -->
     <div id="statusPill">
       <span id="statusText">Ready</span>
       <button id="btnStop" class="btn-stop" onclick="stopTranslation()" style="display:none;">Stop ⏹</button>
     </div>
 
-    <!-- Upload Card -->
     <div class="card">
       <div class="upload-row">
         <div class="upload-info">
@@ -359,7 +356,6 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Subtitle Cards List -->
     <div id="subList">
       <div class="card" style="text-align: center; padding: 40px 10px; color: #f472b6;">
         <div style="font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px;">No Subtitles Loaded</div>
@@ -368,7 +364,6 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Sticky Footer -->
   <footer>
     <div class="footer-info">
       <span>Model: <b id="footerModelName" style="color:#fff;">gemini-3.5-flash-lite</b></span>
@@ -557,7 +552,7 @@ HTML_PAGE = """<!DOCTYPE html>
         parseSRT(txt);
         setStatus("SRT file loaded!", 3000);
       } else {
-        const groqKey = localStorage.getItem(KEY_GROQ);
+        const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
         if (!groqKey) {
           alert("Audio/Video transcribe လုပ်ရန် Settings တွင် Groq API Key ထည့်ပေးပါခင်ဗျာ။");
           openSettingsModal();
