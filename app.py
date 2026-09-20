@@ -32,7 +32,7 @@ def transcribe():
     file = request.files.get('file')
     api_key = request.form.get('apiKey')
     if not file or not api_key:
-        return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
+        return jsonify({"error": "Video/Audio အတွက် Groq API Key လိုအပ်ပါသည်"}), 400
 
     try:
         files = {'file': (file.filename, file.read(), file.content_type)}
@@ -48,7 +48,7 @@ def transcribe():
         )
         
         if res.status_code != 200:
-            err_msg = res.json().get('error', {}).get('message', 'Transcription Failed')
+            err_msg = res.json().get('error', {}).get('message', 'Audio Transcription Failed')
             return jsonify({"error": err_msg}), 400
 
         result = res.json()
@@ -75,18 +75,29 @@ def translate():
     req = request.json or {}
     subtitles = req.get('subtitles', [])
     target_lang = req.get('targetLang', 'Burmese')
+    tone_style = req.get('toneStyle', 'natural')
     provider = req.get('provider', 'gemini')
     api_key = req.get('apiKey', '')
     model_name = req.get('modelName', 'gemini-1.5-flash')
 
     if not api_key:
-        return jsonify({"error": "API Key ထည့်သွင်းပေးပါ (Settings တွင် စစ်ဆေးပါ)"}), 400
+        return jsonify({"error": f"{provider.upper()} API Key မရှိသေးပါ။ Menu -> Settings ထဲတွင် ထည့်သွင်းပေးပါ"}), 400
+
+    tone_descriptions = {
+        'natural': 'natural spoken conversational style suitable for movie/drama subtitles (သဘာဝကျကျ စကားပြောဟန်)',
+        'formal': 'polite, elegant literary/formal style suitable for documentaries or official media (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
+        'explaining': 'clear, easy-to-understand instructional/educational style as if explaining to an audience (နားလည်လွယ်အောင် သေချာရှင်းပြသလိုဟန်)',
+        'casual': 'relaxed, trendy youthful casual style with modern slangs (ပေါ့ပေါ့ပါးပါး လူငယ်သုံး စကားပြောဟန်)'
+    }
+    chosen_tone = tone_descriptions.get(tone_style, tone_descriptions['natural'])
 
     system_prompt = (
-        f"You are an expert subtitle translator. Translate the following subtitles into {target_lang}. "
-        f"Output strictly a valid JSON array of objects with keys 'id' and 'translatedText'. "
-        f"Keep the translation natural, concise, and conversational for subtitles. "
-        f"Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
+        f"You are a professional audiovisual subtitle translator. "
+        f"Translate the following subtitles into {target_lang}. "
+        f"Translation Style Instruction: {chosen_tone}. "
+        f"Maintain emotional nuances, natural flow, and match subtitle reading speed. "
+        f"Output STRICTLY a valid JSON array of objects with keys 'id' (number) and 'translatedText' (string). "
+        f"Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ ခင်ဗျာ\"}}]"
     )
 
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
@@ -97,7 +108,7 @@ def translate():
             headers = {"Content-Type": "application/json"}
             body = {
                 "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
-                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.2}
+                "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3}
             }
             res = requests.post(url, headers=headers, json=body, timeout=120)
             if res.status_code != 200:
@@ -118,7 +129,7 @@ def translate():
                     {"role": "user", "content": json.dumps(payload_data)}
                 ],
                 "response_format": {"type": "json_object"},
-                "temperature": 0.2
+                "temperature": 0.3
             }
             res = requests.post(url, headers=headers, json=body, timeout=120)
             if res.status_code != 200:
@@ -136,19 +147,19 @@ HTML_PAGE = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Thiri's Koko — Subtitle Studio</title>
+  <title>Thiri's Koko — AI Subtitle Studio</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Padauk:wght@400;700&display=swap" rel="stylesheet">
   <style>
     body {
-      background: radial-gradient(circle at 50% 0%, #280d1e 0%, #12060d 100%);
+      background: radial-gradient(circle at 50% 0%, #290d1f 0%, #11050c 100%);
       font-family: 'Plus Jakarta Sans', 'Padauk', sans-serif;
       -webkit-tap-highlight-color: transparent;
     }
     .romantic-card {
-      background: rgba(36, 14, 26, 0.75);
+      background: rgba(36, 14, 26, 0.78);
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
       border: 1px solid rgba(243, 146, 189, 0.18);
@@ -161,9 +172,9 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   </style>
 </head>
-<body class="text-rose-100 min-h-full flex flex-col selection:bg-rose-500 selection:text-white pb-28">
+<body class="text-rose-100 min-h-full flex flex-col selection:bg-rose-500 selection:text-white pb-36">
 
-  <!-- Main Top Bar -->
+  <!-- Header -->
   <header class="sticky top-0 z-40 romantic-card border-b border-rose-900/40 px-4 py-3 flex items-center justify-between">
     <div class="flex items-center gap-2.5">
       <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-rose-600 to-pink-500 flex items-center justify-center text-white font-bold shadow-md shadow-rose-900/40">
@@ -175,57 +186,72 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="flex items-center gap-2">
-      <!-- Target Language -->
-      <select id="targetLang" class="bg-rose-950/80 border border-rose-800/60 text-xs text-rose-100 rounded-xl px-2.5 py-1.5 focus:outline-none focus:border-rose-400">
-        <option value="Burmese">မြန်မာစာ (Burmese)</option>
-        <option value="English">English</option>
-        <option value="Thai">ภาษาไทย (Thai)</option>
-        <option value="Japanese">日本語 (Japanese)</option>
-        <option value="Chinese">中文 (Chinese)</option>
-      </select>
-
-      <!-- 3-Line Hamburger Menu Button -->
-      <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white hover:bg-rose-800/60 transition active:scale-95" aria-label="Menu">
-        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
-        </svg>
-      </button>
-    </div>
+    <!-- 3-Line Hamburger Menu -->
+    <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white hover:bg-rose-800/60 transition active:scale-95" aria-label="Menu">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+      </svg>
+    </button>
   </header>
 
-  <!-- Status Notification Banner -->
+  <!-- Status Notification Pill -->
   <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-center gap-2 shadow-sm">
     <div class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
     <span id="statusText">Processing...</span>
   </div>
 
-  <!-- Main Subtitle Editor Container -->
+  <!-- Main Container -->
   <main class="flex-1 px-4 py-3 max-w-3xl mx-auto w-full flex flex-col gap-3">
     
-    <!-- Quick Upload Bar -->
-    <div class="romantic-card rounded-2xl p-3 border border-rose-800/40 flex items-center justify-between gap-3">
-      <div class="flex items-center gap-2.5">
-        <div class="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-300 flex items-center justify-center">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
-          </svg>
+    <!-- 1. Upload Section -->
+    <div class="romantic-card rounded-2xl p-4 border border-rose-800/40 flex flex-col gap-3">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-300 flex items-center justify-center">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            </svg>
+          </div>
+          <div>
+            <h2 class="text-xs font-semibold text-rose-100">Upload SRT / Video / Audio</h2>
+            <p class="text-[10px] text-rose-400">Total Loaded: <span id="subCount">0</span> subtitles</p>
+          </div>
         </div>
+        
+        <input type="file" id="fileInput" accept=".srt,video/*,audio/*" class="hidden"/>
+        <label for="fileInput" class="cursor-pointer bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-2 px-3.5 rounded-xl shadow transition active:scale-95">
+          Choose File
+        </label>
+      </div>
+
+      <!-- 2. Target Language & Tone Style Options (File Upload အောက်) -->
+      <div class="pt-3 border-t border-rose-900/60 grid grid-cols-1 md:grid-cols-2 gap-2.5">
         <div>
-          <h2 class="text-xs font-semibold text-rose-100">Upload File (.srt, .mp4, .mp3)</h2>
-          <p class="text-[10px] text-rose-400">Total: <span id="subCount">0</span> subtitles</p>
+          <label class="block text-[11px] font-medium text-rose-300 mb-1">Target Language (ပြောင်းမည့် ဘာသာစကား)</label>
+          <select id="targetLang" onchange="handleLangChange()" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none focus:border-rose-400">
+            <option value="Burmese">မြန်မာစာ (Burmese)</option>
+            <option value="English">English</option>
+            <option value="Thai">ภาษาไทย (Thai)</option>
+            <option value="Japanese">日本語 (Japanese)</option>
+            <option value="Chinese">中文 (Chinese)</option>
+          </select>
+        </div>
+
+        <div id="toneContainer">
+          <label class="block text-[11px] font-medium text-rose-300 mb-1">စကားပြောပုံစံ / အသုံးအနှုန်းဟန်</label>
+          <select id="toneStyle" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none focus:border-rose-400">
+            <option value="natural">🗣️ သဘာဝကျ စကားပြောဟန် (ရုပ်ရှင်/ဇာတ်လမ်း)</option>
+            <option value="formal">📖 စာဟန်ပေဟန် (ယဉ်ကျေး/မှတ်တမ်းတင်)</option>
+            <option value="explaining">🎓 ရှင်းပြသလိုဟန် (သေချာနားလည်လွယ်အောင်)</option>
+            <option value="casual">🎭 ပေါ့ပေါ့ပါးပါး လူငယ်သုံး (Modern Slangs)</option>
+          </select>
         </div>
       </div>
-      
-      <input type="file" id="fileInput" accept=".srt,video/*,audio/*" class="hidden"/>
-      <label for="fileInput" class="cursor-pointer bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-2 px-3.5 rounded-xl shadow transition active:scale-95">
-        Choose File
-      </label>
     </div>
 
     <!-- Subtitle Cards List -->
     <div id="subList" class="space-y-2.5">
-      <div class="romantic-card rounded-2xl p-10 text-center border border-rose-900/40 text-rose-300/80 my-4">
+      <div class="romantic-card rounded-2xl p-10 text-center border border-rose-900/40 text-rose-300/80 my-2">
         <div class="w-12 h-12 rounded-full bg-rose-500/10 text-rose-400 mx-auto flex items-center justify-center mb-3">
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
@@ -233,33 +259,60 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <h3 class="text-sm font-semibold text-rose-100 mb-1">No Subtitles Loaded</h3>
         <p class="text-xs text-rose-400/80 max-w-xs mx-auto mb-3">
-          ဖုန်းထဲက SRT စာတန်းထိုးဖိုင် (သို့မဟုတ် ဗီဒီယို/အသံဖိုင်) ကို Choose File နှိပ်ပြီး စတင်ထည့်သွင်းပါ
+          ဗီဒီယို/အသံဖိုင် သို့မဟုတ် SRT ဖိုင်ကို Choose File နှိပ်၍ တင်ပေးပါ
         </p>
-        <button onclick="openSettingsModal()" class="text-xs text-rose-300 bg-rose-900/40 border border-rose-800/60 px-3.5 py-1.5 rounded-xl hover:bg-rose-800/50 transition">
-          ⚙ API Key ထည့်ရန် နှိပ်ပါ
-        </button>
       </div>
     </div>
   </main>
 
-  <!-- Sticky Bottom Action Bar -->
-  <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex items-center gap-2 max-w-md mx-auto">
-    <button onclick="translateAll()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition romantic-glow active:scale-[0.98]">
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"/>
-      </svg>
-      <span>Translate All</span>
-    </button>
+  <!-- Sticky Bottom Controls: Engine Switcher & Export Actions -->
+  <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex flex-col gap-2 max-w-lg mx-auto md:max-w-xl">
+    
+    <!-- Translation Engine Quick Switcher -->
+    <div class="flex items-center justify-between text-xs px-1">
+      <span class="text-[11px] text-rose-300 font-medium">Translate with:</span>
+      <div class="flex items-center gap-1.5">
+        <label class="flex items-center gap-1 cursor-pointer">
+          <input type="radio" name="transEngine" value="gemini" checked onchange="saveActiveEngine('gemini')" class="accent-rose-500">
+          <span class="text-xs text-indigo-300 font-medium">Gemini 1.5 Flash</span>
+        </label>
+        <span class="text-rose-700">|</span>
+        <label class="flex items-center gap-1 cursor-pointer">
+          <input type="radio" name="transEngine" value="groq" onchange="saveActiveEngine('groq')" class="accent-rose-500">
+          <span class="text-xs text-pink-300 font-medium">Groq (Llama 3.3)</span>
+        </label>
+      </div>
+    </div>
 
-    <button onclick="downloadSRT()" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-4 rounded-xl flex items-center gap-1.5 transition active:scale-[0.98]">
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-      </svg>
-      <span>Export .SRT</span>
-    </button>
+    <!-- Buttons Row -->
+    <div class="flex items-center gap-2">
+      <!-- Translate All -->
+      <button onclick="translateAll()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129"/>
+        </svg>
+        <span>Translate All</span>
+      </button>
+
+      <!-- Download Original SRT -->
+      <button onclick="downloadOriginalSRT()" title="Download Original SRT" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>
+        <span>Original .SRT</span>
+      </button>
+
+      <!-- Download Translated SRT -->
+      <button onclick="downloadTranslatedSRT()" title="Download Translated SRT" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>
+        <span>Translated .SRT</span>
+      </button>
+    </div>
   </footer>
 
-  <!-- ================= RIGHT SIDE DRAWER MENU ================= -->
+  <!-- ================= RIGHT DRAWER MENU ================= -->
   <div id="menuOverlay" onclick="toggleMenu(false)" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden transition-opacity"></div>
   <aside id="menuDrawer" class="fixed top-0 right-0 bottom-0 w-80 max-w-[85vw] bg-rose-950 border-l border-rose-800/60 z-50 transform translate-x-full drawer-transition flex flex-col p-5 shadow-2xl">
     <div class="flex items-center justify-between border-b border-rose-900/60 pb-4 mb-4">
@@ -267,14 +320,10 @@ HTML_PAGE = """<!DOCTYPE html>
         <span class="text-rose-400 font-bold text-lg">☰</span>
         <h2 class="text-sm font-bold text-white tracking-wide">Menu</h2>
       </div>
-      <button onclick="toggleMenu(false)" class="p-1 rounded-lg text-rose-400 hover:text-white">
-        ✕
-      </button>
+      <button onclick="toggleMenu(false)" class="p-1 rounded-lg text-rose-400 hover:text-white">✕</button>
     </div>
 
     <div class="flex-1 overflow-y-auto space-y-4 text-xs">
-      
-      <!-- Settings Tab Button in Menu -->
       <button onclick="toggleMenu(false); openSettingsModal();" class="w-full bg-rose-900/50 hover:bg-rose-900/80 border border-rose-800/60 rounded-xl p-3 text-left flex items-center justify-between text-rose-100 transition">
         <div class="flex items-center gap-2.5">
           <span class="text-base">⚙</span>
@@ -286,32 +335,30 @@ HTML_PAGE = """<!DOCTYPE html>
         <span class="text-rose-400 font-bold">➔</span>
       </button>
 
-      <!-- Guide Section: API Key ယူနည်း -->
+      <!-- API Key ယူနည်း လမ်းညွှန် -->
       <div class="romantic-card rounded-2xl p-4 border border-rose-900/60 space-y-3">
         <div class="flex items-center gap-2 text-rose-300 font-semibold border-b border-rose-900/60 pb-2">
           <span>🔑</span>
           <span>API Key ယူနည်း (အခမဲ့)</span>
         </div>
 
-        <!-- Groq Key Link & Guide -->
         <div class="space-y-1.5">
           <a href="https://console.groq.com/keys" target="_blank" class="block font-bold text-pink-300 hover:underline flex items-center justify-between bg-rose-900/30 p-2 rounded-lg border border-rose-800/40">
             <span>👉 Groq API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Website</span>
+            <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Console</span>
           </a>
           <p class="text-[11px] text-rose-200/80 leading-relaxed pl-1">
-            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး Google Account ဖြင့် Sign In ဝင်ပါ။ <strong>"Create API Key"</strong> ကို နှိပ်ပြီး Key ကို Copy ကူးကာ ယူပါ။ (အလွန်မြန်ပြီး အသံဖိုင် transcribe လုပ်ရန် မဖြစ်မနေ လိုအပ်ပါသည်)
+            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး Google Account ဖြင့် ဝင်ပါ။ <strong>"Create API Key"</strong> နှိပ်ပြီး ယူပါ။ (Audio/Video transcribe ရန် မဖြစ်မနေ လိုအပ်ပါသည်)
           </p>
         </div>
 
         <div class="border-t border-rose-900/40 pt-2 space-y-1.5">
-          <!-- Gemini Key Link & Guide -->
           <a href="https://aistudio.google.com/app/apikey" target="_blank" class="block font-bold text-indigo-300 hover:underline flex items-center justify-between bg-indigo-950/40 p-2 rounded-lg border border-indigo-800/40">
             <span>👉 Gemini API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">Google AI</span>
+            <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">AI Studio</span>
           </a>
           <p class="text-[11px] text-rose-200/80 leading-relaxed pl-1">
-            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး Google Account ဖြင့် ဝင်ပါ။ <strong>"Create API key in new project"</strong> ကို နှိပ်၍ Key ကို Copy ကူးယူပါ။
+            <strong>ယူနည်း:</strong> Link ကို နှိပ်ပြီး <strong>"Create API key in new project"</strong> နှိပ်ကာ ကူးယူပါ။
           </p>
         </div>
       </div>
@@ -322,50 +369,36 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </aside>
 
-  <!-- ================= SETTINGS MODAL (AUTO-SAVE) ================= -->
+  <!-- ================= SETTINGS MODAL ================= -->
   <div id="settingsModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
     <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4">
-      
       <div class="flex items-center justify-between border-b border-rose-900/80 pb-2.5">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <span>⚙</span> API Settings & Engine
+          <span>⚙</span> API Settings
         </h3>
         <button onclick="closeSettingsModal()" class="text-rose-400 hover:text-white text-base">✕</button>
       </div>
 
       <div class="space-y-3.5 text-xs">
-        <!-- AI Engine Choice -->
         <div>
-          <label class="block text-[11px] font-medium text-rose-300 mb-1">Active AI Engine (ဘာသာပြန်ရာတွင် သုံးမည့် Engine)</label>
-          <select id="modalProvider" onchange="handleModalProviderChange()" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2.5 text-rose-100 focus:outline-none">
-            <option value="gemini">Google Gemini</option>
-            <option value="groq">Groq (Llama 3.3)</option>
-          </select>
-        </div>
-
-        <!-- Model Name -->
-        <div>
-          <label class="block text-[11px] font-medium text-rose-300 mb-1">Model Name</label>
-          <input id="modalModelName" type="text" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
-        </div>
-
-        <!-- Groq API Key Input Field -->
-        <div class="pt-1 border-t border-rose-900/60">
           <div class="flex justify-between items-center mb-1">
-            <label class="text-[11px] font-medium text-pink-300">Groq API Key</label>
-            <a href="https://console.groq.com/keys" target="_blank" class="text-[10px] text-pink-400 underline">Key ယူရန် ↗</a>
+            <label class="text-[11px] font-medium text-pink-300">Groq API Key (Whisper STT အတွက်)</label>
+            <a href="https://console.groq.com/keys" target="_blank" class="text-[10px] text-pink-400 underline">ယူရန် ↗</a>
           </div>
           <input id="modalGroqKey" type="password" placeholder="gsk_..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
-          <p class="text-[10px] text-rose-400/70 mt-1">* Audio/Video မှ စာတန်းထိုးထုတ်ရန် မဖြစ်မနေ လိုအပ်ပါသည်</p>
         </div>
 
-        <!-- Gemini API Key Input Field -->
-        <div class="pt-1 border-t border-rose-900/60">
+        <div>
           <div class="flex justify-between items-center mb-1">
-            <label class="text-[11px] font-medium text-indigo-300">Gemini API Key</label>
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-[10px] text-indigo-400 underline">Key ယူရန် ↗</a>
+            <label class="text-[11px] font-medium text-indigo-300">Gemini API Key (Subtitle Translate အတွက်)</label>
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-[10px] text-indigo-400 underline">ယူရန် ↗</a>
           </div>
           <input id="modalGeminiKey" type="password" placeholder="AIzaSy..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-medium text-rose-300 mb-1">Gemini Model Name</label>
+          <input id="modalGeminiModel" type="text" value="gemini-1.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
       </div>
 
@@ -374,31 +407,36 @@ HTML_PAGE = """<!DOCTYPE html>
           Save Keys & Close (အမြဲမှတ်ထားမည်)
         </button>
       </div>
-
     </div>
   </div>
 
   <script>
     let subtitles = [];
 
-    // Local Storage Keys
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
-    const KEY_PROVIDER = 'thiri_koko_provider';
-    const KEY_MODEL = 'thiri_koko_model';
+    const KEY_TRANS_ENGINE = 'thiri_koko_trans_engine';
+    const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
 
-    // Load saved settings on startup
     window.addEventListener('DOMContentLoaded', () => {
-      const savedGroq = localStorage.getItem(KEY_GROQ) || '';
-      const savedGemini = localStorage.getItem(KEY_GEMINI) || '';
-      const savedProvider = localStorage.getItem(KEY_PROVIDER) || 'gemini';
-      const savedModel = localStorage.getItem(KEY_MODEL) || 'gemini-1.5-flash';
+      document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
+      document.getElementById('modalGeminiKey').value = localStorage.getItem(KEY_GEMINI) || '';
+      document.getElementById('modalGeminiModel').value = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-1.5-flash';
 
-      document.getElementById('modalGroqKey').value = savedGroq;
-      document.getElementById('modalGeminiKey').value = savedGemini;
-      document.getElementById('modalProvider').value = savedProvider;
-      document.getElementById('modalModelName').value = savedModel;
+      const engine = localStorage.getItem(KEY_TRANS_ENGINE) || 'gemini';
+      const radio = document.querySelector(`input[name="transEngine"][value="${engine}"]`);
+      if (radio) radio.checked = true;
     });
+
+    function handleLangChange() {
+      const lang = document.getElementById('targetLang').value;
+      const toneBox = document.getElementById('toneContainer');
+      toneBox.style.display = (lang === 'Burmese') ? 'block' : 'none';
+    }
+
+    function saveActiveEngine(engine) {
+      localStorage.setItem(KEY_TRANS_ENGINE, engine);
+    }
 
     function toggleMenu(show) {
       const drawer = document.getElementById('menuDrawer');
@@ -420,40 +458,25 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('settingsModal').classList.add('hidden');
     }
 
-    function handleModalProviderChange() {
-      const p = document.getElementById('modalProvider').value;
-      document.getElementById('modalModelName').value = (p === 'gemini') ? 'gemini-1.5-flash' : 'llama-3.3-70b-versatile';
-    }
-
     function saveSettings() {
-      const groqKey = document.getElementById('modalGroqKey').value.trim();
-      const geminiKey = document.getElementById('modalGeminiKey').value.trim();
-      const provider = document.getElementById('modalProvider').value;
-      const model = document.getElementById('modalModelName').value.trim();
-
-      localStorage.setItem(KEY_GROQ, groqKey);
-      localStorage.setItem(KEY_GEMINI, geminiKey);
-      localStorage.setItem(KEY_PROVIDER, provider);
-      localStorage.setItem(KEY_MODEL, model);
-
+      localStorage.setItem(KEY_GROQ, document.getElementById('modalGroqKey').value.trim());
+      localStorage.setItem(KEY_GEMINI, document.getElementById('modalGeminiKey').value.trim());
+      localStorage.setItem(KEY_GEMINI_MODEL, document.getElementById('modalGeminiModel').value.trim() || 'gemini-1.5-flash');
       closeSettingsModal();
-      setStatus("Settings & API Keys သိမ်းဆည်းပြီးပါပြီ!", 3000);
+      setStatus("API Keys မှတ်သားပြီးပါပြီ!", 3000);
     }
 
     function setStatus(text, duration = 0) {
       const pill = document.getElementById('statusPill');
       document.getElementById('statusText').innerText = text;
       pill.classList.remove('hidden');
-      if (duration > 0) {
-        setTimeout(() => pill.classList.add('hidden'), duration);
-      }
+      if (duration > 0) setTimeout(() => pill.classList.add('hidden'), duration);
     }
 
     function clearStatus() {
       document.getElementById('statusPill').classList.add('hidden');
     }
 
-    // File Upload Handler
     document.getElementById('fileInput').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -467,12 +490,12 @@ HTML_PAGE = """<!DOCTYPE html>
       } else {
         const groqKey = localStorage.getItem(KEY_GROQ);
         if (!groqKey) {
-          alert('Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu -> Settings တွင် Groq API Key အရင်ထည့်ပေးပါခင်ဗျာ။');
+          alert('Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu -> Settings တွင် Groq API Key အရင်ထည့်ပေးပါခင်ဗျာ။');
           openSettingsModal();
           return;
         }
 
-        setStatus("Whisper AI ဖြင့် အသံဖိုင်မှ စာတန်းထိုး ထုတ်ယူနေပါသည် (ခဏစောင့်ပါ)...");
+        setStatus("Groq Whisper ဖြင့် အသံဖိုင်မှ မူရင်းစာတန်းထိုး ထုတ်ယူနေပါသည် (ခဏစောင့်ပါ)...");
         const fd = new FormData();
         fd.append('file', file);
         fd.append('apiKey', groqKey);
@@ -483,7 +506,7 @@ HTML_PAGE = """<!DOCTYPE html>
           if (data.error) throw new Error(data.error);
           subtitles = data.subtitles;
           renderList();
-          setStatus("Transcription ပြီးစီးပါပြီ!", 3000);
+          setStatus("Original Subtitles ထုတ်ယူပြီးပါပြီ!", 3000);
         } catch(err) {
           alert("Error: " + err.message);
           clearStatus();
@@ -519,7 +542,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       if (!subtitles.length) {
         box.innerHTML = `
-          <div class="romantic-card rounded-2xl p-10 text-center border border-rose-900/40 text-rose-300/80 my-4">
+          <div class="romantic-card rounded-2xl p-10 text-center border border-rose-900/40 text-rose-300/80 my-2">
             <h3 class="text-sm font-semibold text-rose-100 mb-1">No Subtitles Loaded</h3>
             <p class="text-xs text-rose-400/80">Choose File နှိပ်၍ SRT ဖိုင် သို့မဟုတ် ဗီဒီယို/အသံဖိုင် တင်ပါ</p>
           </div>`;
@@ -550,25 +573,28 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function translateAll() {
-      const provider = localStorage.getItem(KEY_PROVIDER) || 'gemini';
+      const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
       const groqKey = localStorage.getItem(KEY_GROQ) || '';
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const model = localStorage.getItem(KEY_MODEL) || (provider === 'gemini' ? 'gemini-1.5-flash' : 'llama-3.3-70b-versatile');
+      const geminiModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-1.5-flash';
 
-      const activeKey = provider === 'gemini' ? geminiKey : groqKey;
+      const apiKey = (selectedEngine === 'gemini') ? geminiKey : groqKey;
+      const modelName = (selectedEngine === 'gemini') ? geminiModel : 'llama-3.3-70b-versatile';
 
-      if (!activeKey) {
-        alert(`${provider.toUpperCase()} API Key မရှိသေးပါ။ Menu -> Settings ထဲတွင် API Key အရင်ထည့်ပေးပါခင်ဗျာ။`);
+      if (!apiKey) {
+        alert(`${selectedEngine.toUpperCase()} API Key မရှိသေးပါ။ Menu -> Settings တွင် API Key အရင်ထည့်ပေးပါခင်ဗျာ။`);
         openSettingsModal();
         return;
       }
       if (!subtitles.length) {
-        alert("Translate လုပ်ရန် Subtitle မရှိသေးပါ");
+        alert("ဘာသာပြန်ရန် Subtitle မရှိသေးပါ");
         return;
       }
 
-      setStatus("AI ဖြင့် ဘာသာပြန်ဆိုနေပါသည်...");
+      setStatus(`${selectedEngine.toUpperCase()} ဖြင့် ဘာသာပြန်ဆိုနေပါသည်...`);
       const chunkSize = 20;
+      const targetLang = document.getElementById('targetLang').value;
+      const toneStyle = document.getElementById('toneStyle').value;
 
       for (let i = 0; i < subtitles.length; i += chunkSize) {
         const chunk = subtitles.slice(i, i + chunkSize);
@@ -580,10 +606,11 @@ HTML_PAGE = """<!DOCTYPE html>
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
               subtitles: chunk,
-              targetLang: document.getElementById('targetLang').value,
-              provider: provider,
-              modelName: model,
-              apiKey: activeKey
+              targetLang: targetLang,
+              toneStyle: toneStyle,
+              provider: selectedEngine,
+              modelName: modelName,
+              apiKey: apiKey
             })
           });
           const data = await res.json();
@@ -602,7 +629,25 @@ HTML_PAGE = """<!DOCTYPE html>
       setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
     }
 
-    function downloadSRT() {
+    // Export Original SRT File
+    function downloadOriginalSRT() {
+      if (!subtitles.length) {
+        alert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
+        return;
+      }
+      let out = "";
+      subtitles.forEach((s, i) => {
+        out += `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.originalText}\\n\\n`;
+      });
+      const blob = new Blob([out], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = "original_subtitles.srt";
+      a.click();
+    }
+
+    // Export Translated SRT File
+    function downloadTranslatedSRT() {
       if (!subtitles.length) {
         alert("Export လုပ်ရန် Subtitle မရှိသေးပါ");
         return;
@@ -615,7 +660,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const blob = new Blob([out], { type: 'text/plain;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = "Thiri_Koko_subtitles.srt";
+      a.download = "translated_subtitles.srt";
       a.click();
     }
   </script>
