@@ -5,11 +5,10 @@ import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-# 100MB File upload limit
+# 100MB upload limit
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  
 
 def strip_markdown_fences(text: str) -> str:
-    """LLM ပြန်ပို့သော JSON မှ ```json code fences များကို သန့်စင်ပေးသည့် helper"""
     t = text.strip()
     if t.startswith("```"):
         t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
@@ -28,8 +27,7 @@ def transcribe():
         data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         
-        # Pure Groq Whisper Endpoint
-        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
         res = requests.post(url, headers=headers, files=files, data=data, timeout=180)
         
         if res.status_code != 200:
@@ -72,7 +70,6 @@ def translate():
     if not subtitles:
         return jsonify({"error": "ဘာသာပြန်ရန် စာတန်းထိုး မရှိပါ"}), 400
 
-    # Model ID စစ်ဆေးသန့်စင်ခြင်း
     model_id = re.sub(r'[^a-zA-Z0-9\-\.]', '', raw_model)
     if not model_id:
         model_id = 'gemini-3.5-flash-lite'
@@ -95,8 +92,7 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        # Standard Clean Gemini Endpoint
-        endpoint = "https://generativelanguage.googleapis.com/v1beta/models/" + model_id + ":generateContent"
+        endpoint = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)" + model_id + ":generateContent"
         
         headers = {
             "Content-Type": "application/json",
@@ -131,7 +127,7 @@ def translate():
         res_json = res.json()
         candidates = res_json.get('candidates', [])
         if not candidates or 'content' not in candidates[0]:
-            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ (Filter သို့မဟုတ် Quota Limit ကြောင့်ဖြစ်နိုင်သည်)"}), 400
+            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ"}), 400
 
         raw_text = candidates[0]['content']['parts'][0]['text']
         cleaned_json = strip_markdown_fences(raw_text)
@@ -163,7 +159,7 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6;
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       min-height: 100vh;
-      padding-bottom: 100px;
+      padding-bottom: 105px;
       overflow-x: hidden;
     }
     header {
@@ -183,12 +179,12 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     .brand-title { font-size: 15px; font-weight: 700; color: #fff; line-height: 1.2; }
     .brand-subtitle { font-size: 10px; color: #f472b6; }
-    .header-btns { display: flex; align-items: center; gap: 8px; }
-    .btn-header {
+    
+    .btn-icon {
       background: rgba(225, 29, 72, 0.15);
       border: 1px solid rgba(244, 114, 182, 0.3);
-      color: #fbcfe8; padding: 6px 12px; border-radius: 10px;
-      font-size: 12px; font-weight: 600; cursor: pointer;
+      color: #fbcfe8; width: 36px; height: 36px; border-radius: 10px;
+      font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;
     }
 
     .container { max-width: 680px; margin: 0 auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -222,6 +218,34 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6; padding: 9px 12px; border-radius: 10px; font-size: 12px; outline: none;
     }
 
+    /* Video Player Box */
+    #videoContainer {
+      display: none; position: relative; border-radius: 16px; overflow: hidden;
+      background: #000; border: 1px solid rgba(244, 114, 182, 0.3);
+    }
+    video { width: 100%; max-height: 240px; display: block; outline: none; }
+    #videoSubOverlay {
+      position: absolute; bottom: 35px; left: 10px; right: 10px; text-align: center;
+      pointer-events: none;
+    }
+    #videoSubOverlay span {
+      background: rgba(0, 0, 0, 0.82); color: #fef08a; padding: 4px 10px;
+      border-radius: 6px; font-size: 13px; font-weight: 600; text-shadow: 0 1px 2px #000;
+    }
+
+    /* Timing Sync Bar */
+    .sync-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; background: rgba(30, 8, 22, 0.7);
+      border-radius: 12px; border: 1px solid rgba(244, 114, 182, 0.15);
+      font-size: 11px; color: #f472b6;
+    }
+    .sync-btns { display: flex; gap: 6px; }
+    .btn-sync {
+      background: rgba(225, 29, 72, 0.2); border: 1px solid rgba(244, 114, 182, 0.3);
+      color: #ffe4e6; padding: 4px 9px; border-radius: 8px; font-size: 11px; font-weight: bold; cursor: pointer;
+    }
+
     #progressContainer { display: none; margin-top: 5px; }
     .progress-bar-bg { width: 100%; background: #26081c; border: 1px solid rgba(244, 114, 182, 0.2); border-radius: 20px; height: 8px; overflow: hidden; }
     .progress-bar-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #e11d48, #ec4899); transition: width 0.3s; }
@@ -232,21 +256,30 @@ HTML_PAGE = """<!DOCTYPE html>
       border-radius: 14px; padding: 10px 14px; font-size: 11px; color: #fbcfe8;
       align-items: center; justify-content: space-between; gap: 10px; width: 100%;
     }
-    #statusText {
-      flex: 1; min-width: 0; word-break: break-word; overflow-wrap: anywhere; line-height: 1.4;
-    }
+    #statusText { flex: 1; min-width: 0; word-break: break-word; overflow-wrap: anywhere; line-height: 1.4; }
     .btn-stop {
       background: #be123c; color: white; border: none; padding: 6px 12px;
-      border-radius: 10px; font-size: 11px; font-weight: bold; cursor: pointer;
-      flex-shrink: 0; white-space: nowrap;
+      border-radius: 10px; font-size: 11px; font-weight: bold; cursor: pointer; flex-shrink: 0;
     }
 
+    /* Subtitle Item Cards */
     .sub-item {
       background: rgba(38, 12, 27, 0.85); border: 1px solid rgba(244, 114, 182, 0.15);
       border-radius: 14px; padding: 12px; margin-bottom: 8px;
     }
-    .sub-header { display: flex; justify-content: space-between; font-size: 10px; font-family: monospace; color: #f472b6; border-bottom: 1px solid rgba(244, 114, 182, 0.1); padding-bottom: 6px; margin-bottom: 8px; }
-    .sub-id { background: rgba(225, 29, 72, 0.15); padding: 2px 6px; border-radius: 6px; font-weight: bold; }
+    .sub-header {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 10px; font-family: monospace; color: #f472b6;
+      border-bottom: 1px solid rgba(244, 114, 182, 0.1); padding-bottom: 6px; margin-bottom: 8px;
+    }
+    .sub-id {
+      background: rgba(225, 29, 72, 0.15); padding: 2px 6px; border-radius: 6px;
+      font-weight: bold; cursor: pointer;
+    }
+    .btn-retrans {
+      background: rgba(244, 114, 182, 0.15); border: 1px solid rgba(244, 114, 182, 0.3);
+      color: #fbcfe8; font-size: 10px; font-family: sans-serif; padding: 2px 8px; border-radius: 6px; cursor: pointer;
+    }
     .sub-orig { font-size: 12px; color: #fecdd3; margin-bottom: 8px; line-height: 1.4; }
     textarea {
       width: 100%; background: #170410; border: 1px solid rgba(244, 114, 182, 0.2);
@@ -271,6 +304,7 @@ HTML_PAGE = """<!DOCTYPE html>
       color: #ffe4e6; font-size: 11px; font-weight: 600; padding: 11px 12px; border-radius: 12px; cursor: pointer;
     }
 
+    /* Modals & Drawer */
     .modal-overlay {
       position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,0.75);
       backdrop-filter: blur(6px); display: none; align-items: center; justify-content: center; padding: 16px;
@@ -281,10 +315,25 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     .modal-head { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(244, 114, 182, 0.15); padding-bottom: 10px; margin-bottom: 12px; }
     .close-btn { background: none; border: none; color: #f472b6; font-size: 18px; cursor: pointer; }
+
+    /* Hamburger Drawer */
+    #drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: 280px;
+      background: #230919; border-left: 1px solid rgba(244, 114, 182, 0.3);
+      z-index: 60; transform: translateX(100%); transition: transform 0.25s ease-in-out;
+      padding: 20px; display: flex; flex-direction: column; gap: 14px;
+    }
+    #drawer.open { transform: translateX(0); }
+    .drawer-item {
+      display: flex; align-items: center; gap: 10px; padding: 12px;
+      background: rgba(225, 29, 72, 0.1); border: 1px solid rgba(244, 114, 182, 0.2);
+      border-radius: 12px; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
   </style>
 </head>
 <body>
 
+  <!-- Header with Hamburger -->
   <header>
     <div class="brand">
       <div class="brand-icon">❤</div>
@@ -293,13 +342,38 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="brand-subtitle">AI Subtitle Studio Pro</div>
       </div>
     </div>
-    <div class="header-btns">
-      <button class="btn-header" onclick="openSettingsModal()">⚙ Settings</button>
-      <button class="btn-header" onclick="openGuideModal()">🔑 Guide</button>
-    </div>
+    <button class="btn-icon" onclick="toggleDrawer(true)">☰</button>
   </header>
 
+  <!-- Hamburger Drawer -->
+  <div id="drawerOverlay" class="modal-overlay" onclick="toggleDrawer(false)"></div>
+  <div id="drawer">
+    <div class="modal-head">
+      <div style="font-size: 15px; font-weight: bold; color: #fff;">Menu</div>
+      <button class="close-btn" onclick="toggleDrawer(false)">✕</button>
+    </div>
+    
+    <div class="drawer-item" onclick="toggleDrawer(false); openSettingsModal();">
+      <span>⚙</span> Settings & Tuning
+    </div>
+
+    <a class="drawer-item" href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank">
+      <span>🔑</span> Gemini API Key ယူရန် (Google)
+    </a>
+
+    <a class="drawer-item" href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank">
+      <span>⚡</span> Groq API Key ယူရန် (Console)
+    </a>
+  </div>
+
   <div class="container">
+    <!-- Synced Video Player Box -->
+    <div id="videoContainer">
+      <video id="mainVideo" controls></video>
+      <div id="videoSubOverlay"><span id="liveSubText"></span></div>
+    </div>
+
+    <!-- Progress Bar -->
     <div id="progressContainer">
       <div class="progress-bar-bg">
         <div id="progressBar" class="progress-bar-fill"></div>
@@ -310,11 +384,13 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Status Banner -->
     <div id="statusPill">
       <span id="statusText">Ready</span>
       <button id="btnStop" class="btn-stop" onclick="stopTranslation()" style="display:none;">Stop ⏹</button>
     </div>
 
+    <!-- Upload Card -->
     <div class="card">
       <div class="upload-row">
         <div class="upload-info">
@@ -356,14 +432,25 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Timing Adjustment Controls (±0.5s) -->
+    <div class="sync-bar">
+      <span>⏱ Subtitle Sync (အသံနှင့်စာ ချိန်ညှိရန်):</span>
+      <div class="sync-btns">
+        <button class="btn-sync" onclick="adjustTiming(-0.5)">-0.5s ⏪</button>
+        <button class="btn-sync" onclick="adjustTiming(0.5)">+0.5s ⏩</button>
+      </div>
+    </div>
+
+    <!-- Subtitle Cards List -->
     <div id="subList">
       <div class="card" style="text-align: center; padding: 40px 10px; color: #f472b6;">
         <div style="font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 4px;">No Subtitles Loaded</div>
-        <div style="font-size: 11px; opacity: 0.8;">Choose File နှိပ်၍ .srt ဖိုင် တင်ပေးပါ</div>
+        <div style="font-size: 11px; opacity: 0.8;">Choose File နှိပ်၍ .srt ဖိုင် သို့မဟုတ် ဗီဒီယို တင်ပေးပါ</div>
       </div>
     </div>
   </div>
 
+  <!-- Sticky Footer -->
   <footer>
     <div class="footer-info">
       <span>Model: <b id="footerModelName" style="color:#fff;">gemini-3.5-flash-lite</b></span>
@@ -393,7 +480,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
             <option value="gemini-3-flash">Gemini 3 Flash</option>
             <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-            <option value="gemini-3.8-flash">Gemini 3.8 Flash (RPM 5 သာရှိသဖြင့် Delay တိုးပါ)</option>
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
           </select>
         </div>
 
@@ -434,32 +521,6 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Guide Modal -->
-  <div id="guideModal" class="modal-overlay">
-    <div class="modal-box">
-      <div class="modal-head">
-        <div style="font-size: 14px; font-weight: bold; color: #fff;">🔑 API Key ရယူနည်း Guide</div>
-        <button class="close-btn" onclick="closeGuideModal()">✕</button>
-      </div>
-
-      <div style="display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.5; color: #fbcfe8;">
-        <div class="card" style="background: rgba(225,29,72,0.1);">
-          <div style="font-weight: bold; color: #fff; margin-bottom: 4px;">၁။ Gemini API Key (အခမဲ့)</div>
-          <p>• aistudio.google.com သို့ Gmail ဖြင့် Sign in ဝင်ပါ<br>
-             • Create API key ကို နှိပ်ပြီး ရလာသော Key ကို ထည့်ပါ</p>
-        </div>
-
-        <div class="card" style="background: rgba(225,29,72,0.1);">
-          <div style="font-weight: bold; color: #fff; margin-bottom: 4px;">၂။ Groq API Key (အသံဖိုင်အတွက်)</div>
-          <p>• console.groq.com တွင် အကောင့်ဖွင့်ပါ<br>
-             • API Keys ထဲမှ အခမဲ့ ရယူနိုင်ပါသည်</p>
-        </div>
-
-        <button class="btn-export" onclick="closeGuideModal()" style="width: 100%;">နားလည်ပါပြီ</button>
-      </div>
-    </div>
-  </div>
-
   <script>
     let subtitles = [];
     let isTranslating = false;
@@ -476,6 +537,23 @@ HTML_PAGE = """<!DOCTYPE html>
     function escapeHtml(str) {
       if (!str) return '';
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+
+    // Convert "00:01:20,123" to seconds and back
+    function timeToSec(t) {
+      const [hms, ms] = t.split(/[,.]/);
+      const [h, m, s] = hms.split(':').map(Number);
+      return h * 3600 + m * 60 + s + (Number(ms || 0) / 1000);
+    }
+
+    function secToTime(sec) {
+      sec = Math.max(0, sec);
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = Math.floor(sec % 60);
+      const ms = Math.floor((sec % 1) * 1000);
+      const pad = (n, z=2) => String(n).padStart(z, '0');
+      return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
     }
 
     window.addEventListener('DOMContentLoaded', () => {
@@ -495,12 +573,34 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('footerDelaySec').innerText = `${savedDelay}s`;
 
       document.getElementById('fileInput').addEventListener('change', handleFileSelected);
+
+      // Video Time Update for Live Subtitle Sync
+      const video = document.getElementById('mainVideo');
+      video.addEventListener('timeupdate', () => {
+        const cur = video.currentTime;
+        const curSub = subtitles.find(s => {
+          const st = timeToSec(s.startTime);
+          const et = timeToSec(s.endTime);
+          return cur >= st && cur <= et;
+        });
+        const overlay = document.getElementById('liveSubText');
+        if (curSub) {
+          overlay.innerText = curSub.translatedText || curSub.originalText;
+          overlay.style.display = 'inline-block';
+        } else {
+          overlay.innerText = '';
+          overlay.style.display = 'none';
+        }
+      });
     });
+
+    function toggleDrawer(open) {
+      document.getElementById('drawer').classList.toggle('open', open);
+      document.getElementById('drawerOverlay').style.display = open ? 'flex' : 'none';
+    }
 
     function openSettingsModal() { document.getElementById('settingsModal').style.display = 'flex'; }
     function closeSettingsModal() { document.getElementById('settingsModal').style.display = 'none'; }
-    function openGuideModal() { document.getElementById('guideModal').style.display = 'flex'; }
-    function closeGuideModal() { document.getElementById('guideModal').style.display = 'none'; }
 
     function saveSettings() {
       const gKey = document.getElementById('modalGroqKey').value.trim();
@@ -546,6 +646,13 @@ HTML_PAGE = """<!DOCTYPE html>
 
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
+
+      // Video Preview Setup
+      if (['mp4', 'webm', 'mov'].includes(ext)) {
+        const video = document.getElementById('mainVideo');
+        video.src = URL.createObjectURL(file);
+        document.getElementById('videoContainer').style.display = 'block';
+      }
 
       if (ext === 'srt') {
         const txt = await file.text();
@@ -602,6 +709,28 @@ HTML_PAGE = """<!DOCTYPE html>
       renderList();
     }
 
+    // 0.5s Adjustment Function
+    function adjustTiming(delta) {
+      if (!subtitles.length) return;
+      subtitles.forEach(s => {
+        const st = Math.max(0, timeToSec(s.startTime) + delta);
+        const et = Math.max(0, timeToSec(s.endTime) + delta);
+        s.startTime = secToTime(st);
+        s.endTime = secToTime(et);
+      });
+      renderList();
+      setStatus(`စာတန်းထိုး အချိန် ${delta > 0 ? '+' : ''}${delta}s ချိန်ညှိပြီးပါပြီ!`, 2500);
+    }
+
+    // Jump video to subtitle timestamp
+    function seekVideoTo(timeStr) {
+      const video = document.getElementById('mainVideo');
+      if (video && video.src) {
+        video.currentTime = timeToSec(timeStr);
+        video.play();
+      }
+    }
+
     function renderList() {
       const box = document.getElementById('subList');
       document.getElementById('subCount').innerText = subtitles.length;
@@ -614,13 +743,48 @@ HTML_PAGE = """<!DOCTYPE html>
       box.innerHTML = subtitles.map((s, idx) => `
         <div class="sub-item">
           <div class="sub-header">
-            <span class="sub-id">#${s.id}</span>
-            <span>${s.startTime.split(',')[0]} ➔ ${s.endTime.split(',')[0]}</span>
+            <span class="sub-id" onclick="seekVideoTo('${s.startTime}')">#${s.id} (${s.startTime.split(',')[0]}) ▶</span>
+            <button class="btn-retrans" onclick="retranslateSingle(${s.id})">🔄 Re-translate</button>
           </div>
           <div class="sub-orig">${escapeHtml(s.originalText)}</div>
           <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value">${escapeHtml(s.translatedText)}</textarea>
         </div>
       `).join('');
+    }
+
+    // Single Line Re-translate Function
+    async function retranslateSingle(subId) {
+      const item = subtitles.find(s => s.id === subId);
+      if (!item) return;
+
+      const geminiKey = (localStorage.getItem(KEY_GEMINI) || '').trim();
+      const modelName = (localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite').trim();
+      if (!geminiKey) return alert("Gemini API Key လိုအပ်ပါသည်");
+
+      setStatus(`#${subId} ကို အသစ်ပြန်ဆိုနေပါသည်...`);
+      try {
+        const res = await fetch('/api/translate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            subtitles: [{ id: item.id, originalText: item.originalText }],
+            targetLang: document.getElementById('targetLang').value,
+            toneStyle: document.getElementById('toneStyle').value,
+            modelName: modelName,
+            apiKey: geminiKey
+          })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        if (data.translations && data.translations[0]) {
+          item.translatedText = data.translations[0].translatedText;
+          renderList();
+          setStatus(`#${subId} အသစ်ပြန်ဆိုပြီးပါပြီ!`, 3000);
+        }
+      } catch(err) {
+        alert("Re-translate Error: " + err.message);
+      }
     }
 
     function stopTranslation() {
