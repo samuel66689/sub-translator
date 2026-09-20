@@ -5,7 +5,7 @@ import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-# 100MB upload limit
+# 100MB Upload limit for video/audio
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  
 
 def strip_markdown_fences(text: str) -> str:
@@ -27,8 +27,9 @@ def transcribe():
         data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         
-        url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
-        res = requests.post(url, headers=headers, files=files, data=data, timeout=180)
+        # Absolute Pure String URL for Groq Whisper
+        groq_url = "[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)"
+        res = requests.post(groq_url, headers=headers, files=files, data=data, timeout=180)
         
         if res.status_code != 200:
             err_msg = res.json().get('error', {}).get('message', f'Groq Error ({res.status_code})')
@@ -92,7 +93,9 @@ def translate():
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        endpoint = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)" + model_id + ":generateContent"
+        # Absolute Pure String URL for Gemini REST API
+        base_endpoint = "[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/)"
+        endpoint = f"{base_endpoint}{model_id}:generateContent"
         
         headers = {
             "Content-Type": "application/json",
@@ -311,17 +314,17 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     .modal-box {
       background: #240b1b; border: 1px solid rgba(244, 114, 182, 0.3);
-      border-radius: 20px; width: 100%; max-width: 400px; padding: 18px; max-height: 90vh; overflow-y: auto;
+      border-radius: 20px; width: 100%; max-width: 440px; padding: 18px; max-height: 90vh; overflow-y: auto;
     }
     .modal-head { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(244, 114, 182, 0.15); padding-bottom: 10px; margin-bottom: 12px; }
     .close-btn { background: none; border: none; color: #f472b6; font-size: 18px; cursor: pointer; }
 
     /* Hamburger Drawer */
     #drawer {
-      position: fixed; top: 0; right: 0; bottom: 0; width: 280px;
+      position: fixed; top: 0; right: 0; bottom: 0; width: 290px;
       background: #230919; border-left: 1px solid rgba(244, 114, 182, 0.3);
       z-index: 60; transform: translateX(100%); transition: transform 0.25s ease-in-out;
-      padding: 20px; display: flex; flex-direction: column; gap: 14px;
+      padding: 20px; display: flex; flex-direction: column; gap: 12px;
     }
     #drawer.open { transform: translateX(0); }
     .drawer-item {
@@ -357,12 +360,16 @@ HTML_PAGE = """<!DOCTYPE html>
       <span>⚙</span> Settings & Tuning
     </div>
 
-    <a class="drawer-item" href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank">
-      <span>🔑</span> Gemini API Key ယူရန် (Google)
+    <div class="drawer-item" onclick="toggleDrawer(false); openGuideModal();">
+      <span>🔑</span> API Key ယူနည်း အသေးစိတ် Guide
+    </div>
+
+    <a class="drawer-item" href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" rel="noopener noreferrer">
+      <span>🌐</span> Google AI Studio Website ➔
     </a>
 
-    <a class="drawer-item" href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank">
-      <span>⚡</span> Groq API Key ယူရန် (Console)
+    <a class="drawer-item" href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" rel="noopener noreferrer">
+      <span>⚡</span> Groq Cloud Console Website ➔
     </a>
   </div>
 
@@ -521,6 +528,44 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Detailed Guide Modal -->
+  <div id="guideModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div style="font-size: 14px; font-weight: bold; color: #fff;">🔑 API Key ရယူနည်း Guide</div>
+        <button class="close-btn" onclick="closeGuideModal()">✕</button>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; font-size: 12px; line-height: 1.5; color: #fbcfe8;">
+        <!-- Gemini Guide -->
+        <div class="card" style="background: rgba(225,29,72,0.12); padding: 12px;">
+          <div style="font-weight: bold; color: #fff; margin-bottom: 6px;">၁။ Google Gemini API Key (အခမဲ့)</div>
+          <p style="margin-bottom: 6px;">• အောက်ပါခလုတ်ကို နှိပ်ပြီး Google AI Studio သို့ Gmail ဖြင့် Sign in ဝင်ပါ</p>
+          <p style="margin-bottom: 6px;">• ပေါ်လာသော စာမျက်နှာတွင် <b>"Create API key"</b> ခလုတ်ကို နှိပ်ပါ</p>
+          <p style="margin-bottom: 8px;">• ရလာသော <b>AIzaSy...</b> စာကြောင်းကို Copy ယူပြီး Settings တွင် Paste ချပါ</p>
+          <a href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" rel="noopener noreferrer" 
+             style="display: inline-block; background: #4f46e5; color: #fff; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 11px;">
+            Google AI Studio သို့ သွားရန် ➔
+          </a>
+        </div>
+
+        <!-- Groq Guide -->
+        <div class="card" style="background: rgba(225,29,72,0.12); padding: 12px;">
+          <div style="font-weight: bold; color: #fff; margin-bottom: 6px;">၂။ Groq API Key (ဗီဒီယို/အသံဖိုင်အတွက်)</div>
+          <p style="margin-bottom: 6px;">• အောက်ပါခလုတ်ကို နှိပ်ပြီး Groq Console တွင် Free Account ဖွင့်ပါ</p>
+          <p style="margin-bottom: 6px;">• <b>"Create API Key"</b> ခလုတ်ကို နှိပ်ပြီး နာမည်တစ်ခုခု ပေးပါ</p>
+          <p style="margin-bottom: 8px;">• ရလာသော <b>gsk_...</b> စာကြောင်းကို Copy ယူပြီး Settings တွင် ထည့်ပါ</p>
+          <a href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" rel="noopener noreferrer" 
+             style="display: inline-block; background: #e11d48; color: #fff; padding: 6px 12px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 11px;">
+            Groq Console သို့ သွားရန် ➔
+          </a>
+        </div>
+
+        <button class="btn-export" onclick="closeGuideModal()" style="width: 100%; padding: 10px;">ပိတ်မည်</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let subtitles = [];
     let isTranslating = false;
@@ -539,7 +584,6 @@ HTML_PAGE = """<!DOCTYPE html>
       return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
     }
 
-    // Convert "00:01:20,123" to seconds and back
     function timeToSec(t) {
       const [hms, ms] = t.split(/[,.]/);
       const [h, m, s] = hms.split(':').map(Number);
@@ -574,7 +618,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
       document.getElementById('fileInput').addEventListener('change', handleFileSelected);
 
-      // Video Time Update for Live Subtitle Sync
       const video = document.getElementById('mainVideo');
       video.addEventListener('timeupdate', () => {
         const cur = video.currentTime;
@@ -601,6 +644,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function openSettingsModal() { document.getElementById('settingsModal').style.display = 'flex'; }
     function closeSettingsModal() { document.getElementById('settingsModal').style.display = 'none'; }
+    function openGuideModal() { document.getElementById('guideModal').style.display = 'flex'; }
+    function closeGuideModal() { document.getElementById('guideModal').style.display = 'none'; }
 
     function saveSettings() {
       const gKey = document.getElementById('modalGroqKey').value.trim();
@@ -647,7 +692,6 @@ HTML_PAGE = """<!DOCTYPE html>
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
-      // Video Preview Setup
       if (['mp4', 'webm', 'mov'].includes(ext)) {
         const video = document.getElementById('mainVideo');
         video.src = URL.createObjectURL(file);
@@ -661,7 +705,7 @@ HTML_PAGE = """<!DOCTYPE html>
       } else {
         const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
         if (!groqKey) {
-          alert("Audio/Video transcribe လုပ်ရန် Settings တွင် Groq API Key ထည့်ပေးပါခင်ဗျာ။");
+          alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu ထဲက Guide ကို ဖတ်၍ အခမဲ့ ယူနိုင်ပါသည်ခင်ဗျာ။");
           openSettingsModal();
           return;
         }
@@ -709,7 +753,6 @@ HTML_PAGE = """<!DOCTYPE html>
       renderList();
     }
 
-    // 0.5s Adjustment Function
     function adjustTiming(delta) {
       if (!subtitles.length) return;
       subtitles.forEach(s => {
@@ -722,7 +765,6 @@ HTML_PAGE = """<!DOCTYPE html>
       setStatus(`စာတန်းထိုး အချိန် ${delta > 0 ? '+' : ''}${delta}s ချိန်ညှိပြီးပါပြီ!`, 2500);
     }
 
-    // Jump video to subtitle timestamp
     function seekVideoTo(timeStr) {
       const video = document.getElementById('mainVideo');
       if (video && video.src) {
@@ -752,7 +794,6 @@ HTML_PAGE = """<!DOCTYPE html>
       `).join('');
     }
 
-    // Single Line Re-translate Function
     async function retranslateSingle(subId) {
       const item = subtitles.find(s => s.id === subId);
       if (!item) return;
