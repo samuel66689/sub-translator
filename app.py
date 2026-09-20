@@ -3,8 +3,7 @@ import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-# 50MB for upload limit (Groq API limit & mobile friendly)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
@@ -55,82 +54,51 @@ def translate():
     subtitles = req.get('subtitles', [])
     target_lang = req.get('targetLang', 'Burmese')
     tone_style = req.get('toneStyle', 'natural')
-    provider = req.get('provider', 'gemini')
     api_key = req.get('apiKey', '')
-    model_name = req.get('modelName', 'gemini-3.5-flash').strip()
+    model_name = req.get('modelName', 'gemini-3.8-flash').strip()
 
     if not api_key:
-        return jsonify({"error": f"{provider.upper()} API Key လိုအပ်ပါသည်"}), 400
+        return jsonify({"error": "Gemini API Key လိုအပ်ပါသည်"}), 400
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie/drama subtitles (သဘာဝကျကျ စကားပြောဟန်)',
         'formal': 'polite, elegant literary style for documentaries (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
-        'explaining': 'clear, educational/explaining style (နားလည်လွယ်အောင် ရှင်းပြဟန်)',
-        'casual': 'relaxed, youthful casual style with modern slangs (ပေါ့ပေါ့ပါးပါး လူငယ်သုံး)'
+        'explaining': 'clear, educational style (နားလည်လွယ်အောင် ရှင်းပြဟန်)',
+        'casual': 'relaxed youthful casual style with modern slangs (ပေါ့ပေါ့ပါးပါး လူငယ်သုံး)'
     }
     chosen_tone = tone_descriptions.get(tone_style, tone_descriptions['natural'])
 
     system_prompt = (
-        f"You are an audiovisual subtitle translator. "
-        f"Translate the subtitles into {target_lang}. "
-        f"Style: {chosen_tone}. Output strictly a JSON array of objects with keys 'id' and 'translatedText'."
+        f"You are a professional audiovisual subtitle translator. "
+        f"Translate the following subtitles into {target_lang}. "
+        f"Style: {chosen_tone}. Output STRICTLY a valid JSON array of objects with keys 'id' and 'translatedText'. "
+        f"Do NOT omit any IDs. Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
     )
 
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
-        if provider == 'gemini':
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-            headers = {
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key
-            }
-            body = {
-                "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": {
-                        "type": "ARRAY",
-                        "items": {
-                            "type": "OBJECT",
-                            "properties": {
-                                "id": {"type": "INTEGER"},
-                                "translatedText": {"type": "STRING"}
-                            },
-                            "required": ["id", "translatedText"]
-                        }
-                    },
-                    "temperature": 0.25,
-                    "thinkingConfig": {"thinkingLevel": "minimal"}
-                }
-            }
-            res = requests.post(url, headers=headers, json=body, timeout=45)
-            if res.status_code != 200:
-                err_data = res.json().get('error', {})
-                return jsonify({"error": err_data.get('message', 'Gemini API Error')}), res.status_code
-            
-            res_json = res.json()
-            raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
-            translations = json.loads(raw_text)
-
-        elif provider == 'groq':
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            body = {
-                "model": model_name or "llama-3.3-70b-versatile",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(payload_data)}
-                ],
-                "response_format": {"type": "json_object"},
+        clean_model = model_name.replace('models/', '')
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key
+        }
+        body = {
+            "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
                 "temperature": 0.25
             }
-            res = requests.post(url, headers=headers, json=body, timeout=45)
-            if res.status_code != 200:
-                return jsonify({"error": res.json().get('error', {}).get('message', 'Groq API Error')}), res.status_code
-            
-            parsed = json.loads(res.json()['choices'][0]['message']['content'])
-            translations = parsed if isinstance(parsed, list) else parsed.get('translations', parsed.get('subtitles', []))
+        }
+        res = requests.post(url, headers=headers, json=body, timeout=90)
+        if res.status_code != 200:
+            err_data = res.json().get('error', {})
+            return jsonify({"error": err_data.get('message', f'Gemini Error ({res.status_code})')}), res.status_code
+        
+        res_json = res.json()
+        raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
+        translations = json.loads(raw_text)
 
         return jsonify({"translations": translations if isinstance(translations, list) else []})
     except Exception as e:
@@ -152,7 +120,7 @@ HTML_PAGE = """<!DOCTYPE html>
       font-family: 'Plus Jakarta Sans', 'Padauk', sans-serif;
     }
     .romantic-card {
-      background: rgba(36, 14, 26, 0.82);
+      background: rgba(36, 14, 26, 0.85);
       backdrop-filter: blur(14px);
       border: 1px solid rgba(243, 146, 189, 0.18);
     }
@@ -176,9 +144,6 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
-      <button onclick="toggleFindReplace()" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-300 hover:text-white text-xs transition" title="Find & Replace">
-        <span>🔍</span>
-      </button>
       <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition" aria-label="Menu">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
@@ -188,7 +153,7 @@ HTML_PAGE = """<!DOCTYPE html>
   </header>
 
   <!-- Progress Bar -->
-  <div id="progressContainer" class="hidden px-4 pt-2 max-w-3xl mx-auto w-full">
+  <div id="progressContainer" class="hidden px-4 pt-3 max-w-3xl mx-auto w-full">
     <div class="w-full bg-rose-950/80 rounded-full h-2 border border-rose-900/60 overflow-hidden">
       <div id="progressBar" class="bg-gradient-to-r from-rose-500 to-pink-400 h-full transition-all duration-300" style="width: 0%"></div>
     </div>
@@ -198,27 +163,10 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Find & Replace Bar -->
-  <div id="findReplaceBar" class="hidden px-4 pt-2.5 max-w-3xl mx-auto w-full">
-    <div class="romantic-card rounded-2xl p-3 border border-rose-700/50 flex flex-col gap-2">
-      <div class="flex justify-between items-center text-xs text-rose-300 font-semibold border-b border-rose-900/60 pb-1.5">
-        <span>🔍 Find & Replace</span>
-        <button onclick="toggleFindReplace()" class="text-rose-400 hover:text-white">✕</button>
-      </div>
-      <div class="grid grid-cols-2 gap-2 text-xs">
-        <input id="findInput" type="text" placeholder="Find..." class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
-        <input id="replaceInput" type="text" placeholder="Replace with..." class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
-      </div>
-      <button onclick="applyFindReplace()" class="bg-rose-800/80 hover:bg-rose-700 text-white font-medium py-1.5 rounded-xl text-xs transition">
-        Replace All
-      </button>
-    </div>
-  </div>
-
-  <!-- Status Banner -->
+  <!-- Status Banner with Cooldown Timer -->
   <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-between shadow-sm max-w-3xl md:mx-auto">
     <div class="flex items-center gap-2">
-      <div class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
+      <div id="statusIndicator" class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
       <span id="statusText">Processing...</span>
     </div>
     <button id="btnStop" onclick="stopTranslation()" class="hidden px-2.5 py-1 rounded-lg bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-semibold transition">
@@ -229,17 +177,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- Main Container -->
   <main class="flex-1 px-4 py-3 max-w-3xl mx-auto w-full flex flex-col gap-3">
     
-    <!-- Video Player Preview -->
-    <div id="videoContainer" class="hidden romantic-card rounded-2xl p-3 border border-rose-800/40 flex flex-col gap-2">
-      <div class="relative w-full aspect-video bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-lg">
-        <video id="videoElement" controls class="w-full h-full object-contain"></video>
-        <div id="liveSubtitleBox" class="absolute bottom-6 left-3 right-3 text-center pointer-events-none hidden">
-          <span id="liveSubtitleText" class="bg-black/85 text-pink-200 text-xs md:text-sm px-3.5 py-1.5 rounded-xl border border-pink-500/40 shadow-lg"></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Upload & Language Options -->
+    <!-- Upload Section -->
     <div class="romantic-card rounded-2xl p-4 border border-rose-800/40 flex flex-col gap-3">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-2.5">
@@ -297,18 +235,8 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- Sticky Bottom Controls -->
   <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex flex-col gap-2 max-w-lg mx-auto md:max-w-xl">
     <div class="flex items-center justify-between text-xs px-1">
-      <span class="text-[11px] text-rose-300 font-medium">Engine:</span>
-      <div class="flex items-center gap-2">
-        <label class="flex items-center gap-1.5 cursor-pointer">
-          <input type="radio" name="transEngine" value="gemini" checked onchange="saveActiveEngine('gemini')" class="accent-rose-500">
-          <span id="radioGeminiLabel" class="text-xs text-indigo-300 font-semibold">Gemini 3.5 Flash</span>
-        </label>
-        <span class="text-rose-700">|</span>
-        <label class="flex items-center gap-1.5 cursor-pointer">
-          <input type="radio" name="transEngine" value="groq" onchange="saveActiveEngine('groq')" class="accent-rose-500">
-          <span class="text-xs text-pink-300 font-semibold">Groq (Llama 3.3)</span>
-        </label>
-      </div>
+      <span class="text-[11px] text-rose-300 font-medium">Selected Model:</span>
+      <span id="footerModelName" class="text-xs text-pink-300 font-semibold font-mono">gemini-3.8-flash</span>
     </div>
 
     <div class="flex items-center gap-2">
@@ -345,48 +273,36 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="flex items-center gap-2.5">
           <span class="text-base">⚙</span>
           <div>
-            <div class="font-semibold text-white">Settings</div>
-            <div class="text-[10px] text-rose-300/70">API Keys & Model စီမံရန်</div>
+            <div class="font-semibold text-white">Settings & Models</div>
+            <div class="text-[10px] text-rose-300/70">Official Gemini Models ရွေးချယ်ရန်</div>
           </div>
         </div>
         <span class="text-rose-400 font-bold">➔</span>
       </button>
-
-      <div class="romantic-card rounded-2xl p-4 border border-rose-900/60 space-y-3">
-        <div class="flex items-center gap-2 text-rose-300 font-semibold border-b border-rose-900/60 pb-2">
-          <span>🔑</span>
-          <span>API Key ယူနည်း (အခမဲ့)</span>
-        </div>
-        <div class="space-y-1.5">
-          <a href="https://console.groq.com/keys" target="_blank" class="block font-bold text-pink-300 hover:underline flex items-center justify-between bg-rose-900/30 p-2 rounded-lg border border-rose-800/40">
-            <span>👉 Groq API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Console</span>
-          </a>
-        </div>
-        <div class="border-t border-rose-900/40 pt-2 space-y-1.5">
-          <a href="https://aistudio.google.com/app/apikey" target="_blank" class="block font-bold text-indigo-300 hover:underline flex items-center justify-between bg-indigo-950/40 p-2 rounded-lg border border-indigo-800/40">
-            <span>👉 Gemini API Key ယူရန်နှိပ်ပါ</span>
-            <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">AI Studio</span>
-          </a>
-        </div>
-      </div>
     </div>
   </aside>
 
-  <!-- Settings Modal -->
+  <!-- Settings Modal (Only 6 Requested Models) -->
   <div id="settingsModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
     <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4">
       <div class="flex items-center justify-between border-b border-rose-900/80 pb-2.5">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <span>⚙</span> API Settings
+          <span>⚙</span> Model & API Key
         </h3>
         <button onclick="closeSettingsModal()" class="text-rose-400 hover:text-white text-base">✕</button>
       </div>
 
       <div class="space-y-3 text-xs">
         <div>
-          <label class="block text-[11px] font-medium text-pink-300 mb-1">Groq API Key (Whisper Turbo)</label>
-          <input id="modalGroqKey" type="password" placeholder="gsk_..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
+          <label class="block text-[11px] font-medium text-pink-300 mb-1">Official Gemini Model ရွေးပါ</label>
+          <select id="modalGeminiSelect" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2.5 text-rose-100 text-xs focus:outline-none font-mono">
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash (gemini-3.8-flash)</option>
+            <option value="gemini-3.6-flash">Gemini 3.6 Flash (gemini-3.6-flash)</option>
+            <option value="gemini-3.5-flash">Gemini 3.5 Flash (gemini-3.5-flash)</option>
+            <option value="gemini-3-flash">Gemini 3 Flash (gemini-3-flash)</option>
+            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite (gemini-3.5-flash-lite)</option>
+            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (gemini-3.1-flash-lite)</option>
+          </select>
         </div>
 
         <div>
@@ -395,14 +311,14 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
 
         <div>
-          <label class="block text-[11px] font-medium text-rose-300 mb-1">Gemini Model Name</label>
-          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
+          <label class="block text-[11px] font-medium text-rose-400 mb-1">Groq API Key (Audio Transcribe အတွက်သာ)</label>
+          <input id="modalGroqKey" type="password" placeholder="gsk_..." class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none">
         </div>
       </div>
 
       <div class="pt-2">
         <button onclick="saveSettings()" class="w-full bg-gradient-to-r from-rose-600 to-pink-500 text-white font-semibold py-2.5 rounded-xl text-xs shadow transition active:scale-95">
-          Save Keys & Close
+          Save Settings & Close
         </button>
       </div>
     </div>
@@ -415,7 +331,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
-    const KEY_TRANS_ENGINE = 'thiri_koko_trans_engine';
     const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -428,78 +343,14 @@ HTML_PAGE = """<!DOCTYPE html>
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
       document.getElementById('modalGeminiKey').value = localStorage.getItem(KEY_GEMINI) || '';
-      const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash';
-      document.getElementById('modalGeminiModel').value = savedModel;
-      document.getElementById('radioGeminiLabel').innerText = savedModel;
+      
+      const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.8-flash';
+      const select = document.getElementById('modalGeminiSelect');
+      select.value = savedModel;
+      document.getElementById('footerModelName').innerText = savedModel;
 
-      const engine = localStorage.getItem(KEY_TRANS_ENGINE) || 'gemini';
-      const radio = document.querySelector(`input[name="transEngine"][value="${engine}"]`);
-      if (radio) radio.checked = true;
-
-      // Video subtitle sync
-      const vid = document.getElementById('videoElement');
-      vid.addEventListener('timeupdate', () => {
-        const t = vid.currentTime;
-        const active = subtitles.find(s => t >= s.startSec && t <= s.endSec);
-        const box = document.getElementById('liveSubtitleBox');
-        const txt = document.getElementById('liveSubtitleText');
-        if (active) {
-          txt.innerText = active.translatedText || active.originalText;
-          box.classList.remove('hidden');
-        } else {
-          box.classList.add('hidden');
-        }
-      });
-
-      // Bind File Input Listener Safely
-      const fileInput = document.getElementById('fileInput');
-      fileInput.addEventListener('change', handleFileSelected);
+      document.getElementById('fileInput').addEventListener('change', handleFileSelected);
     });
-
-    function toSeconds(tStr) {
-      const [hms, ms] = tStr.trim().split(/[,.]/);
-      const [h, m, s] = hms.split(':').map(Number);
-      return h * 3600 + m * 60 + s + (Number(ms || 0) / 1000);
-    }
-
-    function fromSeconds(sec) {
-      const sClamped = Math.max(0, sec);
-      const h = Math.floor(sClamped / 3600);
-      const m = Math.floor((sClamped % 3600) / 60);
-      const s = Math.floor(sClamped % 60);
-      const ms = Math.floor((sClamped % 1) * 1000);
-      const pad = (n, z = 2) => String(n).padStart(z, '0');
-      return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
-    }
-
-    function adjustTimestamp(idx, deltaSec) {
-      const s = subtitles[idx];
-      s.startSec = Math.max(0, s.startSec + deltaSec);
-      s.endSec = Math.max(0, s.endSec + deltaSec);
-      s.startTime = fromSeconds(s.startSec);
-      s.endTime = fromSeconds(s.endSec);
-      renderList();
-    }
-
-    function toggleFindReplace() {
-      document.getElementById('findReplaceBar').classList.toggle('hidden');
-    }
-
-    function applyFindReplace() {
-      const findVal = document.getElementById('findInput').value;
-      const replaceVal = document.getElementById('replaceInput').value;
-      if (!findVal) return;
-
-      let count = 0;
-      subtitles.forEach(s => {
-        if (s.translatedText && s.translatedText.includes(findVal)) {
-          s.translatedText = s.translatedText.replaceAll(findVal, replaceVal);
-          count++;
-        }
-      });
-      renderList();
-      alert(`စာလုံးပေါင်း (${count}) နေရာကို အစားထိုးပြီးပါပြီ!`);
-    }
 
     function toggleMenu(show) {
       const drawer = document.getElementById('menuDrawer');
@@ -519,18 +370,15 @@ HTML_PAGE = """<!DOCTYPE html>
     function saveSettings() {
       const gKey = document.getElementById('modalGroqKey').value.trim();
       const gmKey = document.getElementById('modalGeminiKey').value.trim();
-      const gmModel = document.getElementById('modalGeminiModel').value.trim() || 'gemini-3.5-flash';
+      const selectedModel = document.getElementById('modalGeminiSelect').value;
 
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
-      localStorage.setItem(KEY_GEMINI_MODEL, gmModel);
-      document.getElementById('radioGeminiLabel').innerText = gmModel;
-      closeSettingsModal();
-      setStatus("Settings သိမ်းဆည်းပြီးပါပြီ!", 3000);
-    }
+      localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
 
-    function saveActiveEngine(engine) {
-      localStorage.setItem(KEY_TRANS_ENGINE, engine);
+      document.getElementById('footerModelName').innerText = selectedModel;
+      closeSettingsModal();
+      setStatus("Model & Settings အောင်မြင်စွာ သိမ်းဆည်းပြီးပါပြီ!", 3000);
     }
 
     function setStatus(text, duration = 0) {
@@ -557,11 +405,6 @@ HTML_PAGE = """<!DOCTYPE html>
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
-      if (['mp4', 'mov', 'webm'].includes(ext)) {
-        document.getElementById('videoElement').src = URL.createObjectURL(file);
-        document.getElementById('videoContainer').classList.remove('hidden');
-      }
-
       if (ext === 'srt') {
         const txt = await file.text();
         parseSRT(txt);
@@ -569,12 +412,12 @@ HTML_PAGE = """<!DOCTYPE html>
       } else {
         const groqKey = localStorage.getItem(KEY_GROQ);
         if (!groqKey) {
-          alert("Audio/Video မှ စာတန်းထိုးထုတ်ရန် Groq API Key လိုအပ်ပါသည်။ Settings တွင် Key အရင်ထည့်ပေးပါခင်ဗျာ။");
+          alert("Video/Audio မှ Subtitle ထုတ်ယူရန် Groq API Key လိုအပ်ပါသည်။ Settings တွင် ထည့်သွင်းပေးပါခင်ဗျာ။");
           openSettingsModal();
           return;
         }
 
-        setStatus("Groq Whisper Turbo ဖြင့် Transcribe လုပ်နေပါသည်...");
+        setStatus("Whisper AI ဖြင့် အသံဖိုင်မှ Subtitle ထုတ်နေပါသည်...");
         const fd = new FormData();
         fd.append('file', file);
         fd.append('apiKey', groqKey);
@@ -583,11 +426,7 @@ HTML_PAGE = """<!DOCTYPE html>
           const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
           const data = await res.json();
           if (data.error) throw new Error(data.error);
-          subtitles = data.subtitles.map(s => ({
-            ...s,
-            startSec: toSeconds(s.startTime),
-            endSec: toSeconds(s.endTime)
-          }));
+          subtitles = data.subtitles;
           renderList();
           setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
         } catch(err) {
@@ -609,8 +448,6 @@ HTML_PAGE = """<!DOCTYPE html>
               id: i + 1,
               startTime: s,
               endTime: e,
-              startSec: toSeconds(s),
-              endSec: toSeconds(e),
               originalText: l.slice(tIdx + 1).join('\\n'),
               translatedText: ''
             });
@@ -634,10 +471,6 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="flex items-center justify-between text-[10px] font-mono text-rose-300/80 border-b border-rose-900/30 pb-1.5 mb-2">
             <span class="px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-300 font-semibold">#${s.id}</span>
             <span>${s.startTime.split(',')[0]} ➔ ${s.endTime.split(',')[0]}</span>
-            <div class="flex gap-1">
-              <button onclick="adjustTimestamp(${idx}, -0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800 hover:text-white">-0.5s</button>
-              <button onclick="adjustTimestamp(${idx}, 0.5)" class="px-1.5 py-0.5 rounded bg-rose-950 border border-rose-800 hover:text-white">+0.5s</button>
-            </div>
           </div>
           <div class="text-xs text-rose-200/90 mb-2 leading-relaxed">${escapeHtml(s.originalText)}</div>
           <textarea rows="2" class="w-full bg-rose-950/80 border border-rose-800/50 rounded-xl p-2 text-xs text-rose-50 resize-none focus:outline-none"
@@ -649,21 +482,16 @@ HTML_PAGE = """<!DOCTYPE html>
     function stopTranslation() {
       isTranslating = false;
       document.getElementById('btnStop').classList.add('hidden');
-      setStatus("ဘာသာပြန်ဆိုမှုကို ရပ်တန့်လိုက်ပါပြီ", 3000);
+      setStatus("ရပ်တန့်လိုက်ပါပြီ", 3000);
     }
 
     async function startTranslation() {
       if (isTranslating) return;
-      const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
-      const groqKey = localStorage.getItem(KEY_GROQ) || '';
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const geminiModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash';
+      const modelName = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.8-flash';
 
-      const apiKey = (selectedEngine === 'gemini') ? geminiKey : groqKey;
-      const modelName = (selectedEngine === 'gemini') ? geminiModel : 'llama-3.3-70b-versatile';
-
-      if (!apiKey) {
-        alert("API Key ထည့်သွင်းပေးပါ (Settings တွင် ထည့်နိုင်ပါသည်)");
+      if (!geminiKey) {
+        alert("Gemini API Key ထည့်သွင်းပေးပါ (Settings တွင် ထည့်နိုင်ပါသည်)");
         openSettingsModal();
         return;
       }
@@ -675,61 +503,64 @@ HTML_PAGE = """<!DOCTYPE html>
       isTranslating = true;
       document.getElementById('btnStop').classList.remove('hidden');
 
-      const chunkSize = 30;
-      const chunks = [];
-      for (let i = 0; i < pending.length; i += chunkSize) {
-        chunks.push(pending.slice(i, i + chunkSize));
-      }
-
+      // Block 50 Items per request
+      const chunkSize = 50; 
       let completedCount = subtitles.length - pending.length;
       updateProgress(completedCount, subtitles.length);
 
-      const concurrency = 2;
-      for (let i = 0; i < chunks.length; i += concurrency) {
+      for (let i = 0; i < pending.length; i += chunkSize) {
         if (!isTranslating) break;
-        const currentBatches = chunks.slice(i, i + concurrency);
+        const chunk = pending.slice(i, i + chunkSize);
 
-        setStatus(`Translation လုပ်ဆောင်နေပါသည် (Batch ${Math.floor(i/concurrency) + 1}/${Math.ceil(chunks.length/concurrency)})...`);
+        setStatus(`[${modelName}] ဘာသာပြန်နေပါသည်: #${chunk[0].id} မှ #${chunk[chunk.length - 1].id} (စာကြောင်း ${chunk.length} ကြောင်း)...`);
 
-        await Promise.all(currentBatches.map(async (chunk) => {
-          let success = false;
-          let retries = 0;
-          while (!success && retries < 4 && isTranslating) {
-            try {
-              const res = await fetch('/api/translate', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                  subtitles: chunk,
-                  targetLang: document.getElementById('targetLang').value,
-                  toneStyle: document.getElementById('toneStyle').value,
-                  provider: selectedEngine,
-                  modelName: modelName,
-                  apiKey: apiKey
-                })
+        let success = false;
+        let retries = 0;
+
+        while (!success && retries < 3 && isTranslating) {
+          try {
+            const res = await fetch('/api/translate', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({
+                subtitles: chunk,
+                targetLang: document.getElementById('targetLang').value,
+                toneStyle: document.getElementById('toneStyle').value,
+                modelName: modelName,
+                apiKey: geminiKey
+              })
+            });
+            const data = await res.json();
+            if (!res.ok || data.error) throw new Error(data.error || "Request failed");
+
+            if (Array.isArray(data.translations) && data.translations.length > 0) {
+              data.translations.forEach(t => {
+                const item = subtitles.find(x => x.id === t.id);
+                if (item) item.translatedText = t.translatedText;
               });
-              const data = await res.json();
-              if (!res.ok || data.error) throw new Error(data.error || "Request failed");
-
-              if (Array.isArray(data.translations)) {
-                data.translations.forEach(t => {
-                  const item = subtitles.find(x => x.id === t.id);
-                  if (item) item.translatedText = t.translatedText;
-                });
-                completedCount += chunk.length;
-                updateProgress(completedCount, subtitles.length);
-              }
-              success = true;
-            } catch(e) {
-              retries++;
-              const waitSec = retries * 3;
-              setStatus(`Server အခြေအနေကြောင့် ${waitSec} စက္ကန့် စောင့်နေပါသည် (${retries}/4)...`);
-              await sleep(waitSec * 1000);
+              completedCount += chunk.length;
+              updateProgress(completedCount, subtitles.length);
+              renderList();
             }
-          }
-        }));
+            success = true;
 
-        renderList();
+            // ၁ မိနစ်လျှင် ၂ ကြိမ်သာ ဖြစ်စေရန် (30 Seconds Cooldown Timer)
+            const isLastChunk = (i + chunkSize) >= pending.length;
+            if (!isLastChunk && isTranslating) {
+              for (let sec = 30; sec > 0; sec--) {
+                if (!isTranslating) break;
+                setStatus(`နောက်တစ်ကြိမ် မပို့မီ စောင့်ဆိုင်းနေပါသည် (Rate Limit Safe): ${sec} စက္ကန့်...`);
+                await sleep(1000);
+              }
+            }
+
+          } catch(e) {
+            retries++;
+            const waitSec = retries * 10;
+            setStatus(`Error: ${e.message} — ${waitSec}s စောင့်ဆိုင်းနေပါသည် (${retries}/3)...`);
+            await sleep(waitSec * 1000);
+          }
+        }
       }
 
       isTranslating = false;
@@ -738,13 +569,13 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function downloadOriginalSRT() {
-      if (!subtitles.length) return alert("Subtitle မရှိသေးပါ");
+      if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.originalText}\\n`).join('\\n');
       triggerDownload(out, `${uploadedFileName}_original.srt`);
     }
 
     function downloadTranslatedSRT() {
-      if (!subtitles.length) return alert("Subtitle မရှိသေးပါ");
+      if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.translatedText || s.originalText}\\n`).join('\\n');
       triggerDownload(out, `${uploadedFileName}_translated.srt`);
     }
