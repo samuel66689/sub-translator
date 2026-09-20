@@ -1,9 +1,20 @@
+import os
+import re
 import json
 import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+# 100MB File upload limit for video/audio
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  
+
+def clean_json_string(text: str) -> str:
+    """Markdown code fences (```json ... ```) များကို သန့်စင်ပေးသည့် function"""
+    text = text.strip()
+    if text.startswith('```'):
+        text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s*```$', '', text)
+    return text.strip()
 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
@@ -18,7 +29,7 @@ def transcribe():
         headers = {'Authorization': f'Bearer {api_key}'}
         
         res = requests.post(
-            'https://api.groq.com/openai/v1/audio/transcriptions',
+            '[https://api.groq.com/openai/v1/audio/transcriptions](https://api.groq.com/openai/v1/audio/transcriptions)',
             headers=headers,
             files=files,
             data=data,
@@ -26,7 +37,7 @@ def transcribe():
         )
         
         if res.status_code != 200:
-            err_msg = res.json().get('error', {}).get('message', 'Audio Transcription Failed')
+            err_msg = res.json().get('error', {}).get('message', f'Groq Whisper Error ({res.status_code})')
             return jsonify({"error": err_msg}), 400
 
         result = res.json()
@@ -45,6 +56,8 @@ def transcribe():
                 "translatedText": ""
             })
         return jsonify({"subtitles": items})
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Audio transcription timed out (180s ကျော်လွန်သွားပါသည်)"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -54,11 +67,14 @@ def translate():
     subtitles = req.get('subtitles', [])
     target_lang = req.get('targetLang', 'Burmese')
     tone_style = req.get('toneStyle', 'natural')
-    api_key = req.get('apiKey', '')
-    model_name = req.get('modelName', 'gemini-3.8-flash').strip()
+    api_key = req.get('apiKey', '').strip()
+    model_name = req.get('modelName', 'gemini-3.5-flash-lite').strip()
 
     if not api_key:
         return jsonify({"error": "Gemini API Key လိုအပ်ပါသည်"}), 400
+
+    if not subtitles:
+        return jsonify({"error": "ဘာသာပြန်ရန် စာတန်းထိုး မရှိပါ"}), 400
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie/drama subtitles (သဘာဝကျကျ စကားပြောဟန်)',
@@ -71,36 +87,64 @@ def translate():
     system_prompt = (
         f"You are a professional audiovisual subtitle translator. "
         f"Translate the following subtitles into {target_lang}. "
-        f"Style: {chosen_tone}. Output STRICTLY a valid JSON array of objects with keys 'id' and 'translatedText'. "
-        f"Do NOT omit any IDs. Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
+        f"Style: {chosen_tone}. Output STRICTLY a valid JSON array of objects with keys 'id' (number) and 'translatedText' (string). "
+        f"Do NOT alter or omit any IDs. Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
     )
 
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
         clean_model = model_name.replace('models/', '')
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent"
+        url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){clean_model}:generateContent"
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key
         }
         body = {
-            "contents": [{"parts": [{"text": system_prompt}, {"text": json.dumps(payload_data)}]}],
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": system_prompt},
+                        {"text": json.dumps(payload_data, ensure_ascii=False)}
+                    ]
+                }
+            ],
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "temperature": 0.25
             }
         }
-        res = requests.post(url, headers=headers, json=body, timeout=90)
+        
+        # 60s timeout to avoid Render gateway timeout
+        res = requests.post(url, headers=headers, json=body, timeout=60)
+        
         if res.status_code != 200:
-            err_data = res.json().get('error', {})
-            return jsonify({"error": err_data.get('message', f'Gemini Error ({res.status_code})')}), res.status_code
+            try:
+                err_data = res.json().get('error', {})
+                err_msg = err_data.get('message', f'Gemini Error ({res.status_code})')
+            except Exception:
+                err_msg = f'Gemini Server Error ({res.status_code})'
+            return jsonify({"error": err_msg}), res.status_code
         
         res_json = res.json()
-        raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
-        translations = json.loads(raw_text)
+        candidates = res_json.get('candidates', [])
+        if not candidates or 'content' not in candidates[0]:
+            return jsonify({"error": "Gemini မှ အဖြေထုတ်မပေးနိုင်ပါ (Safety Filter သို့မဟုတ် Quota Limit ကြောင့်ဖြစ်နိုင်ပါသည်)"}), 400
+
+        raw_text = candidates[0]['content']['parts'][0]['text']
+        cleaned_json = clean_json_string(raw_text)
+        translations = json.loads(cleaned_json)
+
+        # Ensure result is list
+        if isinstance(translations, dict):
+            translations = translations.get('translations', translations.get('subtitles', []))
 
         return jsonify({"translations": translations if isinstance(translations, list) else []})
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Server Timeout ဖြစ်သွားပါသည် (Response ကြာမြင့်လွန်းပါသည်)။ Block Size ကို လျှော့ပေးပါ။"}), 504
+    except json.JSONDecodeError:
+        return jsonify({"error": "AI ပြန်ပို့သော JSON ဒေတာ format မမှန်ကန်ပါ၊ ပြန်လည် ကြိုးစားနေပါသည်..."}), 502
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -110,19 +154,19 @@ HTML_PAGE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Thiri's Koko — AI Subtitle Studio Pro</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Padauk:wght@400;700&display=swap" rel="stylesheet">
+  <script src="[https://cdn.tailwindcss.com](https://cdn.tailwindcss.com)"></script>
+  <link rel="preconnect" href="[https://fonts.googleapis.com](https://fonts.googleapis.com)">
+  <link rel="preconnect" href="[https://fonts.gstatic.com](https://fonts.gstatic.com)" crossorigin>
+  <link href="[https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Padauk:wght@400;700&display=swap](https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Padauk:wght@400;700&display=swap)" rel="stylesheet">
   <style>
     body {
       background: radial-gradient(circle at 50% 0%, #290d1f 0%, #11050c 100%);
       font-family: 'Plus Jakarta Sans', 'Padauk', sans-serif;
     }
     .romantic-card {
-      background: rgba(36, 14, 26, 0.85);
+      background: rgba(36, 14, 26, 0.88);
       backdrop-filter: blur(14px);
-      border: 1px solid rgba(243, 146, 189, 0.18);
+      border: 1px solid rgba(243, 146, 189, 0.2);
     }
     .romantic-glow {
       box-shadow: 0 4px 20px -2px rgba(219, 39, 119, 0.35);
@@ -144,6 +188,9 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
+      <button onclick="openSettingsModal()" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition flex items-center gap-1 text-xs" aria-label="Settings">
+        <span>⚙ Settings</span>
+      </button>
       <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition" aria-label="Menu">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
@@ -163,13 +210,13 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Status Banner with Cooldown Timer -->
+  <!-- Status Banner with Cooldown & Retry Indicator -->
   <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-between shadow-sm max-w-3xl md:mx-auto">
-    <div class="flex items-center gap-2">
-      <div id="statusIndicator" class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
-      <span id="statusText">Processing...</span>
+    <div class="flex items-center gap-2 flex-1 pr-2">
+      <div id="statusDot" class="w-2 h-2 rounded-full bg-rose-400 animate-ping shrink-0"></div>
+      <span id="statusText" class="break-words">Ready</span>
     </div>
-    <button id="btnStop" onclick="stopTranslation()" class="hidden px-2.5 py-1 rounded-lg bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-semibold transition">
+    <button id="btnStop" onclick="stopTranslation()" class="hidden px-2.5 py-1 rounded-lg bg-rose-800 hover:bg-rose-700 text-white text-[10px] font-semibold transition shrink-0">
       Stop ⏹
     </button>
   </div>
@@ -234,9 +281,16 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <!-- Sticky Bottom Controls -->
   <footer class="fixed bottom-0 left-0 right-0 z-30 romantic-card border-t border-rose-900/40 p-3 flex flex-col gap-2 max-w-lg mx-auto md:max-w-xl">
-    <div class="flex items-center justify-between text-xs px-1">
-      <span class="text-[11px] text-rose-300 font-medium">Selected Model:</span>
-      <span id="footerModelName" class="text-xs text-pink-300 font-semibold font-mono">gemini-3.8-flash</span>
+    <div class="flex items-center justify-between text-[11px] px-1 text-rose-300">
+      <div class="flex items-center gap-1 font-mono">
+        <span class="text-pink-400">Model:</span>
+        <span id="footerModelName" class="font-semibold">gemini-3.5-flash-lite</span>
+      </div>
+      <div class="flex items-center gap-2 text-[10px] text-rose-400">
+        <span>Block: <b id="footerBlockSize" class="text-pink-300">25</b></span>
+        <span>•</span>
+        <span>Delay: <b id="footerDelaySec" class="text-pink-300">15s</b></span>
+      </div>
     </div>
 
     <div class="flex items-center gap-2">
@@ -268,13 +322,24 @@ HTML_PAGE = """<!DOCTYPE html>
       <button onclick="toggleMenu(false)" class="p-1 rounded-lg text-rose-400 hover:text-white">✕</button>
     </div>
 
-    <div class="flex-1 overflow-y-auto space-y-4 text-xs">
+    <div class="flex-1 overflow-y-auto space-y-3 text-xs">
       <button onclick="toggleMenu(false); openSettingsModal();" class="w-full bg-rose-900/50 hover:bg-rose-900/80 border border-rose-800/60 rounded-xl p-3 text-left flex items-center justify-between text-rose-100 transition">
         <div class="flex items-center gap-2.5">
           <span class="text-base">⚙</span>
           <div>
-            <div class="font-semibold text-white">Settings & Models</div>
-            <div class="text-[10px] text-rose-300/70">Official Gemini Models ရွေးချယ်ရန်</div>
+            <div class="font-semibold text-white">Settings & Tuning</div>
+            <div class="text-[10px] text-rose-300/70">Model, Block Size, Delay & API Keys</div>
+          </div>
+        </div>
+        <span class="text-rose-400 font-bold">➔</span>
+      </button>
+
+      <button onclick="toggleMenu(false); openGuideModal();" class="w-full bg-rose-900/50 hover:bg-rose-900/80 border border-rose-800/60 rounded-xl p-3 text-left flex items-center justify-between text-rose-100 transition">
+        <div class="flex items-center gap-2.5">
+          <span class="text-base">🔑</span>
+          <div>
+            <div class="font-semibold text-white">API Key Guide</div>
+            <div class="text-[10px] text-rose-300/70">Gemini & Groq API Key အခမဲ့ယူနည်း</div>
           </div>
         </div>
         <span class="text-rose-400 font-bold">➔</span>
@@ -282,27 +347,48 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </aside>
 
-  <!-- Settings Modal (Only 6 Requested Models) -->
-  <div id="settingsModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
-    <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4">
+  <!-- Settings Modal (Model, Custom Block Size, Delay Cooldown) -->
+  <div id="settingsModal" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
       <div class="flex items-center justify-between border-b border-rose-900/80 pb-2.5">
         <h3 class="text-sm font-bold text-white flex items-center gap-2">
-          <span>⚙</span> Model & API Key
+          <span>⚙</span> Settings & Speed Controls
         </h3>
         <button onclick="closeSettingsModal()" class="text-rose-400 hover:text-white text-base">✕</button>
       </div>
 
-      <div class="space-y-3 text-xs">
+      <div class="space-y-3.5 text-xs">
         <div>
           <label class="block text-[11px] font-medium text-pink-300 mb-1">Official Gemini Model ရွေးပါ</label>
           <select id="modalGeminiSelect" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2.5 text-rose-100 text-xs focus:outline-none font-mono">
-            <option value="gemini-3.8-flash">Gemini 3.8 Flash (gemini-3.8-flash)</option>
-            <option value="gemini-3.6-flash">Gemini 3.6 Flash (gemini-3.6-flash)</option>
-            <option value="gemini-3.5-flash">Gemini 3.5 Flash (gemini-3.5-flash)</option>
-            <option value="gemini-3-flash">Gemini 3 Flash (gemini-3-flash)</option>
-            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite (gemini-3.5-flash-lite)</option>
-            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (gemini-3.1-flash-lite)</option>
+            <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite (အကြံပြုချက်: RPM 20)</option>
+            <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite</option>
+            <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+            <option value="gemini-3-flash">Gemini 3 Flash</option>
+            <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+            <option value="gemini-3.8-flash">Gemini 3.8 Flash (RPM 5 သာရှိသဖြင့် Delay တိုးပါ)</option>
           </select>
+        </div>
+
+        <!-- Custom Block Size & Delay -->
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <div>
+            <label class="block text-[10px] font-medium text-rose-300 mb-1">Block Size (စာကြောင်းရေ)</label>
+            <select id="modalBlockSize" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 text-xs focus:outline-none font-mono">
+              <option value="15">15 (အလွန်ငြိမ်)</option>
+              <option value="25" selected>25 (အသင့်တော်ဆုံး)</option>
+              <option value="30">30 (ပုံမှန်)</option>
+              <option value="50">50 (အများဆုံး)</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[10px] font-medium text-rose-300 mb-1">Cooldown Delay (စက္ကန့်)</label>
+            <select id="modalDelaySec" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 text-xs focus:outline-none font-mono">
+              <option value="5">5 စက္ကန့် (အမြန်)</option>
+              <option value="15" selected>15 စက္ကန့် (Safe)</option>
+              <option value="30">30 စက္ကန့် (RPM 2 နှုန်း)</option>
+            </select>
+          </div>
         </div>
 
         <div>
@@ -316,11 +402,56 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div class="pt-2">
+      <div class="pt-2 flex flex-col gap-2">
         <button onclick="saveSettings()" class="w-full bg-gradient-to-r from-rose-600 to-pink-500 text-white font-semibold py-2.5 rounded-xl text-xs shadow transition active:scale-95">
           Save Settings & Close
         </button>
+        <button onclick="closeSettingsModal(); openGuideModal();" class="text-[11px] text-rose-400 hover:underline text-center">
+          🔑 API Key မရှိသေးပါက ဤနေရာတွင် ကြည့်ရှုယူပါ
+        </button>
       </div>
+    </div>
+  </div>
+
+  <!-- API Key Guide Modal -->
+  <div id="guideModal" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-rose-950 border border-rose-800/80 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-3.5 max-h-[90vh] overflow-y-auto text-xs">
+      <div class="flex items-center justify-between border-b border-rose-900/80 pb-2">
+        <h3 class="text-sm font-bold text-white flex items-center gap-1.5">
+          <span>🔑</span> API Key ရယူနည်း လမ်းညွှန်
+        </h3>
+        <button onclick="closeGuideModal()" class="text-rose-400 hover:text-white text-base">✕</button>
+      </div>
+
+      <div class="space-y-3 text-rose-200">
+        <!-- Gemini Guide -->
+        <div class="bg-rose-900/40 p-3 rounded-xl border border-rose-800/50 space-y-1.5">
+          <div class="font-bold text-indigo-300 flex items-center justify-between">
+            <span>၁။ Gemini API Key (အခမဲ့)</span>
+            <a href="[https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)" target="_blank" class="text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded">တိုက်ရိုက်သွားရန် ➔</a>
+          </div>
+          <p class="text-[11px] text-rose-300/90 leading-relaxed">
+            • <b class="text-white">aistudio.google.com</b> သို့ Google Account ဖြင့် ဝင်ပါ<br>
+            • <b>Create API key</b> ကို နှိပ်ပြီး ရလာသော Key ကို Copy ကူးယူကာ Settings တွင် ထည့်ပါ
+          </p>
+        </div>
+
+        <!-- Groq Guide -->
+        <div class="bg-rose-900/40 p-3 rounded-xl border border-rose-800/50 space-y-1.5">
+          <div class="font-bold text-pink-300 flex items-center justify-between">
+            <span>၂။ Groq API Key (အသံဖိုင်အတွက်)</span>
+            <a href="[https://console.groq.com/keys](https://console.groq.com/keys)" target="_blank" class="text-[10px] bg-pink-600 text-white px-2 py-0.5 rounded">တိုက်ရိုက်သွားရန် ➔</a>
+          </div>
+          <p class="text-[11px] text-rose-300/90 leading-relaxed">
+            • <b class="text-white">console.groq.com</b> တွင် အကောင့်ဖွင့်ပါ<br>
+            • <b>API Keys ➔ Create API Key</b> မှတစ်ဆင့် အခမဲ့ ထုတ်ယူပါ
+          </p>
+        </div>
+      </div>
+
+      <button onclick="closeGuideModal()" class="w-full bg-rose-900/80 text-rose-200 py-2 rounded-xl text-xs font-semibold">
+        နားလည်ပါပြီ
+      </button>
     </div>
   </div>
 
@@ -332,6 +463,8 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
     const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
+    const KEY_BLOCK_SIZE = 'thiri_koko_block_size';
+    const KEY_DELAY_SEC = 'thiri_koko_delay_sec';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -344,10 +477,17 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
       document.getElementById('modalGeminiKey').value = localStorage.getItem(KEY_GEMINI) || '';
       
-      const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.8-flash';
-      const select = document.getElementById('modalGeminiSelect');
-      select.value = savedModel;
+      const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
+      const savedBlock = localStorage.getItem(KEY_BLOCK_SIZE) || '25';
+      const savedDelay = localStorage.getItem(KEY_DELAY_SEC) || '15';
+
+      document.getElementById('modalGeminiSelect').value = savedModel;
+      document.getElementById('modalBlockSize').value = savedBlock;
+      document.getElementById('modalDelaySec').value = savedDelay;
+
       document.getElementById('footerModelName').innerText = savedModel;
+      document.getElementById('footerBlockSize').innerText = savedBlock;
+      document.getElementById('footerDelaySec').innerText = `${savedDelay}s`;
 
       document.getElementById('fileInput').addEventListener('change', handleFileSelected);
     });
@@ -366,19 +506,28 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function openSettingsModal() { document.getElementById('settingsModal').classList.remove('hidden'); }
     function closeSettingsModal() { document.getElementById('settingsModal').classList.add('hidden'); }
+    function openGuideModal() { document.getElementById('guideModal').classList.remove('hidden'); }
+    function closeGuideModal() { document.getElementById('guideModal').classList.add('hidden'); }
 
     function saveSettings() {
       const gKey = document.getElementById('modalGroqKey').value.trim();
       const gmKey = document.getElementById('modalGeminiKey').value.trim();
       const selectedModel = document.getElementById('modalGeminiSelect').value;
+      const blockSize = document.getElementById('modalBlockSize').value;
+      const delaySec = document.getElementById('modalDelaySec').value;
 
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
       localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
+      localStorage.setItem(KEY_BLOCK_SIZE, blockSize);
+      localStorage.setItem(KEY_DELAY_SEC, delaySec);
 
       document.getElementById('footerModelName').innerText = selectedModel;
+      document.getElementById('footerBlockSize').innerText = blockSize;
+      document.getElementById('footerDelaySec').innerText = `${delaySec}s`;
+
       closeSettingsModal();
-      setStatus("Model & Settings အောင်မြင်စွာ သိမ်းဆည်းပြီးပါပြီ!", 3000);
+      setStatus("Settings မှတ်သားပြီးပါပြီ!", 3000);
     }
 
     function setStatus(text, duration = 0) {
@@ -424,8 +573,15 @@ HTML_PAGE = """<!DOCTYPE html>
 
         try {
           const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
+          const rawText = await res.text();
+          let data;
+          try {
+            data = JSON.parse(rawText);
+          } catch(e) {
+            throw new Error("Audio transcription server timeout ဖြစ်သွားပါသည်");
+          }
+
+          if (!res.ok || data.error) throw new Error(data.error || "Transcription Failed");
           subtitles = data.subtitles;
           renderList();
           setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
@@ -488,7 +644,9 @@ HTML_PAGE = """<!DOCTYPE html>
     async function startTranslation() {
       if (isTranslating) return;
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
-      const modelName = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.8-flash';
+      const modelName = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
+      const chunkSize = parseInt(localStorage.getItem(KEY_BLOCK_SIZE) || '25', 10);
+      const cooldownSec = parseInt(localStorage.getItem(KEY_DELAY_SEC) || '15', 10);
 
       if (!geminiKey) {
         alert("Gemini API Key ထည့်သွင်းပေးပါ (Settings တွင် ထည့်နိုင်ပါသည်)");
@@ -503,8 +661,6 @@ HTML_PAGE = """<!DOCTYPE html>
       isTranslating = true;
       document.getElementById('btnStop').classList.remove('hidden');
 
-      // Block 50 Items per request
-      const chunkSize = 50; 
       let completedCount = subtitles.length - pending.length;
       updateProgress(completedCount, subtitles.length);
 
@@ -530,7 +686,20 @@ HTML_PAGE = """<!DOCTYPE html>
                 apiKey: geminiKey
               })
             });
-            const data = await res.json();
+
+            // Read text first to prevent Unexpected token '<'
+            const responseText = await res.text();
+            let data;
+
+            try {
+              data = JSON.parse(responseText);
+            } catch(jsonErr) {
+              if (responseText.includes('<html') || responseText.includes('504') || responseText.includes('502')) {
+                throw new Error("Server Timeout (စက္ကန့် ၆၀ ကျော်ကြာမြင့်သွားပါသည်)။ Block Size ကို လျှော့ချပေးပါ။");
+              }
+              throw new Error("AI output decode error (ပြန်လည်ကြိုးစားပါမည်)");
+            }
+
             if (!res.ok || data.error) throw new Error(data.error || "Request failed");
 
             if (Array.isArray(data.translations) && data.translations.length > 0) {
@@ -544,20 +713,20 @@ HTML_PAGE = """<!DOCTYPE html>
             }
             success = true;
 
-            // ၁ မိနစ်လျှင် ၂ ကြိမ်သာ ဖြစ်စေရန် (30 Seconds Cooldown Timer)
+            // User Configured Cooldown Delay Countdown
             const isLastChunk = (i + chunkSize) >= pending.length;
             if (!isLastChunk && isTranslating) {
-              for (let sec = 30; sec > 0; sec--) {
+              for (let sec = cooldownSec; sec > 0; sec--) {
                 if (!isTranslating) break;
-                setStatus(`နောက်တစ်ကြိမ် မပို့မီ စောင့်ဆိုင်းနေပါသည် (Rate Limit Safe): ${sec} စက္ကန့်...`);
+                setStatus(`နောက်တစ်ကြိမ် မပို့မီ စောင့်ဆိုင်းနေပါသည် (Delay ${cooldownSec}s): ${sec} စက္ကန့်...`);
                 await sleep(1000);
               }
             }
 
           } catch(e) {
             retries++;
-            const waitSec = retries * 10;
-            setStatus(`Error: ${e.message} — ${waitSec}s စောင့်ဆိုင်းနေပါသည် (${retries}/3)...`);
+            const waitSec = retries * 8;
+            setStatus(`သတိပေးချက်: ${e.message} — ${waitSec}s အကြာတွင် ထပ်မံကြိုးစားပါမည် (${retries}/3)...`);
             await sleep(waitSec * 1000);
           }
         }
