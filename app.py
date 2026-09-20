@@ -6,8 +6,7 @@ import time
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
-# 500MB upload capacity for high-res videos/audio
-app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB
 
 def parse_srt(srt_text):
     blocks = re.split(r'\n\s*\n', srt_text.strip().replace('\r\n', '\n'))
@@ -83,11 +82,11 @@ def translate():
     model_name = req.get('modelName', 'gemini-3.5-flash').strip()
 
     if not api_key:
-        return jsonify({"error": f"{provider.upper()} API Key လိုအပ်ပါသည် (Settings တွင် စစ်ဆေးပါ)"}), 400
+        return jsonify({"error": f"{provider.upper()} API Key လိုအပ်ပါသည်"}), 400
 
     tone_descriptions = {
         'natural': 'natural spoken conversational style suitable for movie/drama subtitles (သဘာဝကျကျ စကားပြောဟန်)',
-        'formal': 'polite, elegant literary style for documentaries or official talks (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
+        'formal': 'polite, elegant literary style for documentaries or official media (ယဉ်ကျေးသပ်ရပ်သော စာဟန်ပေဟန်)',
         'explaining': 'clear, easy-to-understand educational/explaining style (နားလည်လွယ်အောင် ရှင်းပြဟန်)',
         'casual': 'relaxed, youthful casual style with modern slangs (ပေါ့ပေါ့ပါးပါး လူငယ်သုံး)'
     }
@@ -177,7 +176,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </head>
 <body class="text-rose-100 min-h-full flex flex-col selection:bg-rose-500 selection:text-white pb-36">
 
-  <!-- Header Bar -->
+  <!-- Header -->
   <header class="sticky top-0 z-40 romantic-card border-b border-rose-900/40 px-4 py-3 flex items-center justify-between">
     <div class="flex items-center gap-2.5">
       <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-rose-600 to-pink-500 flex items-center justify-center text-white font-bold shadow-md shadow-rose-900/40">
@@ -190,12 +189,10 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
-      <!-- Find & Replace Toggle -->
       <button onclick="toggleFindReplace()" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-300 hover:text-white text-xs flex items-center gap-1 transition" title="Find & Replace">
         <span>🔍</span>
       </button>
 
-      <!-- 3-Line Menu Button -->
       <button onclick="toggleMenu(true)" class="p-2 rounded-xl bg-rose-900/40 border border-rose-800/50 text-rose-200 hover:text-white transition active:scale-95" aria-label="Menu">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
@@ -204,44 +201,43 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </header>
 
-  <!-- Find & Replace Collapsible Box -->
+  <!-- Find & Replace -->
   <div id="findReplaceBar" class="hidden px-4 pt-2.5 max-w-3xl mx-auto w-full">
     <div class="romantic-card rounded-2xl p-3 border border-rose-700/50 flex flex-col gap-2">
       <div class="flex justify-between items-center text-xs text-rose-300 font-semibold border-b border-rose-900/60 pb-1.5">
-        <span>🔍 Find & Replace (စာလုံး/နာမည် အစားထိုးခြင်း)</span>
+        <span>🔍 Find & Replace</span>
         <button onclick="toggleFindReplace()" class="text-rose-400 hover:text-white">✕</button>
       </div>
       <div class="grid grid-cols-2 gap-2 text-xs">
-        <input id="findInput" type="text" placeholder="ရှာမည့်စာ (Find)" class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
-        <input id="replaceInput" type="text" placeholder="အစားထိုးမည့်စာ (Replace)" class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
+        <input id="findInput" type="text" placeholder="Find..." class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
+        <input id="replaceInput" type="text" placeholder="Replace with..." class="bg-rose-950/90 border border-rose-800 rounded-xl p-2 text-rose-100 focus:outline-none">
       </div>
       <button onclick="applyFindReplace()" class="bg-rose-800/80 hover:bg-rose-700 text-white font-medium py-1.5 rounded-xl text-xs transition">
-        Replace All (အစားထိုးမည်)
+        Replace All
       </button>
     </div>
   </div>
 
-  <!-- Status Notification Banner -->
+  <!-- Status Pill -->
   <div id="statusPill" class="hidden mx-4 mt-2.5 p-2.5 rounded-xl text-xs romantic-card border border-rose-500/40 text-rose-200 flex items-center justify-center gap-2 shadow-sm">
     <div class="w-2 h-2 rounded-full bg-rose-400 animate-ping"></div>
     <span id="statusText">Processing...</span>
   </div>
 
-  <!-- Main Workspace -->
+  <!-- Workspace -->
   <main class="flex-1 px-4 py-3 max-w-3xl mx-auto w-full flex flex-col gap-3">
     
-    <!-- Video Player Preview (Live Subtitle Sync) -->
+    <!-- Video Player Preview -->
     <div id="videoContainer" class="hidden romantic-card rounded-2xl p-3 border border-rose-800/40 flex flex-col gap-2">
       <div class="relative w-full aspect-video bg-black rounded-xl overflow-hidden flex items-center justify-center shadow-lg">
         <video id="videoElement" controls class="w-full h-full object-contain"></video>
-        <!-- Overlay Live Subtitle Box -->
         <div id="liveSubtitleBox" class="absolute bottom-6 left-3 right-3 text-center pointer-events-none hidden">
           <span id="liveSubtitleText" class="bg-black/85 text-pink-200 text-xs md:text-sm px-3.5 py-1.5 rounded-xl border border-pink-500/40 shadow-lg"></span>
         </div>
       </div>
     </div>
 
-    <!-- Upload & Language Preferences Section -->
+    <!-- Upload & Language Preferences -->
     <div class="romantic-card rounded-2xl p-4 border border-rose-800/40 flex flex-col gap-3">
       <div class="flex items-center justify-between">
         <div class="flex items-center gap-2.5">
@@ -262,10 +258,9 @@ HTML_PAGE = """<!DOCTYPE html>
         </label>
       </div>
 
-      <!-- Target Language & Tone Style Options -->
       <div class="pt-3 border-t border-rose-900/60 grid grid-cols-1 md:grid-cols-2 gap-2.5">
         <div>
-          <label class="block text-[11px] font-medium text-rose-300 mb-1">Target Language (ဘာသာစကား)</label>
+          <label class="block text-[11px] font-medium text-rose-300 mb-1">Target Language</label>
           <select id="targetLang" onchange="handleLangChange()" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none">
             <option value="Burmese">မြန်မာစာ (Burmese)</option>
             <option value="English">English</option>
@@ -277,10 +272,10 @@ HTML_PAGE = """<!DOCTYPE html>
         <div id="toneContainer">
           <label class="block text-[11px] font-medium text-rose-300 mb-1">စကားပြောပုံစံ / အသုံးအနှုန်းဟန်</label>
           <select id="toneStyle" class="w-full bg-rose-950/90 border border-rose-800/60 text-xs text-rose-100 rounded-xl p-2 focus:outline-none">
-            <option value="natural">🗣️ သဘာဝကျ စကားပြောဟန် (ရုပ်ရှင်/ဇာတ်လမ်း)</option>
+            <option value="natural">🗣️ သဘာဝကျ စကားပြောဟန်</option>
             <option value="formal">📖 စာဟန်ပေဟန် (ယဉ်ကျေး/တရားဝင်)</option>
-            <option value="explaining">🎓 ရှင်းပြသလိုဟန် (နားလည်လွယ်အောင်)</option>
-            <option value="casual">🎭 ပေါ့ပေါ့ပါးပါး လူငယ်သုံး (Modern Slangs)</option>
+            <option value="explaining">🎓 ရှင်းပြသလိုဟန် (နားလည်လွယ်)</option>
+            <option value="casual">🎭 ပေါ့ပေါ့ပါးပါး လူငယ်သုံး</option>
           </select>
         </div>
       </div>
@@ -315,27 +310,24 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="flex items-center gap-2">
-      <!-- Translate All -->
-      <button onclick="translateAllOptimized()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
+      <button onclick="translateAllSafe()" id="btnTranslate" class="flex-1 bg-gradient-to-r from-rose-600 to-pink-500 hover:from-rose-500 hover:to-pink-400 text-white text-xs font-semibold py-3 px-3 rounded-xl flex items-center justify-center gap-1.5 transition romantic-glow active:scale-[0.98]">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
         </svg>
         <span>Translate All</span>
       </button>
 
-      <!-- Download Original SRT -->
-      <button onclick="downloadOriginalSRT()" title="Download Original SRT" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+      <button onclick="downloadOriginalSRT()" class="bg-rose-950/90 hover:bg-rose-900 text-rose-200 border border-rose-800/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
         <span>Original .SRT</span>
       </button>
 
-      <!-- Download Translated SRT -->
-      <button onclick="downloadTranslatedSRT()" title="Download Translated SRT" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
+      <button onclick="downloadTranslatedSRT()" class="bg-rose-900/80 hover:bg-rose-800 text-white border border-rose-700/60 text-xs font-medium py-3 px-3 rounded-xl flex items-center gap-1 transition active:scale-[0.98]">
         <span>Translated .SRT</span>
       </button>
     </div>
   </footer>
 
-  <!-- Themed Alert Modal -->
+  <!-- Alert Modal -->
   <div id="customAlertModal" class="fixed inset-0 bg-black/70 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
     <div class="bg-rose-950 border border-rose-700/70 rounded-2xl w-full max-w-sm p-5 shadow-2xl space-y-4 romantic-card text-center">
       <div class="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 mx-auto flex items-center justify-center text-xl shadow">✨</div>
@@ -372,11 +364,10 @@ HTML_PAGE = """<!DOCTYPE html>
         <span class="text-rose-400 font-bold">➔</span>
       </button>
 
-      <!-- Guide -->
       <div class="romantic-card rounded-2xl p-4 border border-rose-900/60 space-y-3">
         <div class="flex items-center gap-2 text-rose-300 font-semibold border-b border-rose-900/60 pb-2">
           <span>🔑</span>
-          <span>API Key ယူနည်း (အခမဲ့)</span>
+          <span>API Key ယူနည်း</span>
         </div>
 
         <div class="space-y-1.5">
@@ -384,7 +375,6 @@ HTML_PAGE = """<!DOCTYPE html>
             <span>👉 Groq API Key ယူရန်နှိပ်ပါ</span>
             <span class="text-[10px] bg-pink-500/20 text-pink-200 px-1.5 py-0.5 rounded">Console</span>
           </a>
-          <p class="text-[10px] text-rose-300/70">Video/Audio transcribe အတွက် သုံးပါသည်</p>
         </div>
 
         <div class="border-t border-rose-900/40 pt-2 space-y-1.5">
@@ -392,7 +382,6 @@ HTML_PAGE = """<!DOCTYPE html>
             <span>👉 Gemini API Key ယူရန်နှိပ်ပါ</span>
             <span class="text-[10px] bg-indigo-500/20 text-indigo-200 px-1.5 py-0.5 rounded">AI Studio</span>
           </a>
-          <p class="text-[10px] text-rose-300/70">Subtitle translation အတွက် သုံးပါသည်</p>
         </div>
       </div>
     </div>
@@ -421,8 +410,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
         <div>
           <label class="block text-[11px] font-medium text-rose-300 mb-1">Gemini Model Name</label>
-          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none" placeholder="e.g. gemini-3.5-flash / gemini-3.6-flash">
-          <p class="text-[10px] text-rose-400/70 mt-1">💡 လိုအပ်ပါက Google ၏ မော်ဒယ်အသစ်များကို ဤနေရာတွင် လွတ်လပ်စွာ ရိုက်ထည့်ပြောင်းနိုင်ပါသည်</p>
+          <input id="modalGeminiModel" type="text" value="gemini-3.5-flash" class="w-full bg-rose-900/60 border border-rose-700/60 rounded-xl p-2 text-rose-100 font-mono text-xs focus:outline-none" placeholder="e.g. gemini-3.5-flash">
         </div>
       </div>
 
@@ -455,7 +443,6 @@ HTML_PAGE = """<!DOCTYPE html>
       const radio = document.querySelector(`input[name="transEngine"][value="${engine}"]`);
       if (radio) radio.checked = true;
 
-      // Video subtitle sync
       const vid = document.getElementById('videoElement');
       vid.addEventListener('timeupdate', () => {
         const t = vid.currentTime;
@@ -626,7 +613,6 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('statusPill').classList.add('hidden');
     }
 
-    // File Upload Handler
     document.getElementById('fileInput').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -735,8 +721,8 @@ HTML_PAGE = """<!DOCTYPE html>
       `).join('');
     }
 
-    // STABLE & OPTIMIZED TRANSLATION PIPELINE
-    async function translateAllOptimized() {
+    // SAFE & RESILIENT TRANSLATION (Auto Resume + Quota Safe)
+    async function translateAllSafe() {
       const selectedEngine = document.querySelector('input[name="transEngine"]:checked')?.value || 'gemini';
       const groqKey = localStorage.getItem(KEY_GROQ) || '';
       const geminiKey = localStorage.getItem(KEY_GEMINI) || '';
@@ -754,21 +740,26 @@ HTML_PAGE = """<!DOCTYPE html>
         return;
       }
 
-      // Chunk Size 30 (Balanced for speed and token limits)
-      const chunkSize = 30;
+      // Chunk Size 45 (Request အကြိမ်ရေ အနည်းဆုံးဖြစ်အောင် ချိန်ညှိထားခြင်း)
+      const chunkSize = 45;
       const targetLang = document.getElementById('targetLang').value;
       const toneStyle = document.getElementById('toneStyle').value;
 
-      setStatus(`AI ဘာသာပြန်ဆိုနေပါသည် (စတင်ပါပြီ)...`);
+      // ဘာသာမပြန်ရသေးသော အကြောင်းများကိုသာ စစ်ဆေးလုပ်ဆောင်မည်
+      const remainingItems = subtitles.filter(s => !s.translatedText);
+      if (remainingItems.length === 0) {
+        showCustomAlert("စာကြောင်းများ အားလုံး ဘာသာပြန်ပြီးသား ဖြစ်ပါသည်");
+        return;
+      }
 
-      for (let i = 0; i < subtitles.length; i += chunkSize) {
-        const chunk = subtitles.slice(i, i + chunkSize);
-        setStatus(`ဘာသာပြန်နေပါသည်: ${i + 1} မှ ${Math.min(i + chunkSize, subtitles.length)} / ${subtitles.length} အထိ...`);
+      for (let i = 0; i < remainingItems.length; i += chunkSize) {
+        const chunk = remainingItems.slice(i, i + chunkSize);
+        setStatus(`ဘာသာပြန်နေပါသည်: စာကြောင်း ${chunk[0].id} မှ ${chunk[chunk.length - 1].id} အထိ...`);
 
         let success = false;
-        let retries = 0;
+        let attempt = 0;
 
-        while (!success && retries < 3) {
+        while (!success && attempt < 5) {
           try {
             const res = await fetch('/api/translate', {
               method: 'POST',
@@ -782,6 +773,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 apiKey: apiKey
               })
             });
+
             const data = await res.json();
             if (data.error) throw new Error(data.error);
 
@@ -789,19 +781,26 @@ HTML_PAGE = """<!DOCTYPE html>
               const item = subtitles.find(x => x.id === t.id);
               if (item) item.translatedText = t.translatedText;
             });
+
             renderList();
             success = true;
-
-            // Rate Limit မမိစေရန် 1.2 စက္ကန့် စောင့်ပေးခြင်း
-            await sleep(1200);
+            await sleep(2000); // Request တစ်ခုပြီးတိုင်း ၂ စက္ကန့် pause ပေးခြင်း
 
           } catch(err) {
-            retries++;
-            if (retries < 3) {
-              setStatus(`Server ခေတ္တကြပ်နေ၍ စောင့်ဆိုင်းနေပါသည် (${retries}/3)...`);
-              await sleep(3000);
+            attempt++;
+            const errMsg = err.message || "";
+            // Quota limit သို့မဟုတ် High demand ဖြစ်ပါက Google ကန့်သတ်ချက်ကျော်လွန်အောင် စောင့်ပေးခြင်း
+            let waitSeconds = 5;
+            const matchWait = errMsg.match(/retry in ([0-9.]+)s/);
+            if (matchWait && matchWait[1]) {
+              waitSeconds = Math.ceil(parseFloat(matchWait[1])) + 2;
+            }
+
+            if (attempt < 5) {
+              setStatus(`Rate Limit ကျော်လွန်ရန် ${waitSeconds} စက္ကန့် ခေတ္တနားပြီး အလိုအလျောက် ဆက်လုပ်ပါမည် (${attempt}/5)...`);
+              await sleep(waitSeconds * 1000);
             } else {
-              showCustomAlert(`Error ဖြစ်ပေါ်ခဲ့ပါသည်- ${err.message}\n(Groq Engine သို့ ပြောင်း၍လည်း စမ်းသပ်နိုင်ပါသည်)`, "ဘာသာပြန်ဆိုမှု ပြတ်တောက်သွားပါသည်");
+              showCustomAlert(`Error ဖြစ်ပေါ်ခဲ့ပါသည်- ${err.message}\nကျန်ရှိသော အကြောင်းများကို ထပ်မံနှိပ်၍ ဆက်လက်ဘာသာပြန်နိုင်ပါသည်`, "ခေတ္တရပ်နားပါသည်");
               clearStatus();
               return;
             }
@@ -809,7 +808,7 @@ HTML_PAGE = """<!DOCTYPE html>
         }
       }
 
-      setStatus("ဘာသာပြန်ဆိုခြင်း အောင်မြင်စွာ ပြီးစီးပါပြီ!", 4000);
+      setStatus("စာကြောင်းအားလုံး ဘာသာပြန်ဆိုပြီးပါပြီ!", 4000);
     }
 
     function downloadOriginalSRT() {
