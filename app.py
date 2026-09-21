@@ -1,7 +1,10 @@
+import io
 import re
 import json
 import requests
-from flask import Flask, request, jsonify, Response
+from gtts import gTTS
+from pydub import AudioSegment
+from flask import Flask, request, jsonify, Response, send_file
 
 app = Flask(__name__)
 # 100MB Upload limit for video/audio
@@ -33,6 +36,15 @@ def fmt_srt_time(sec: float) -> str:
     m, rem = divmod(rem, 60000)
     s, ms = divmod(rem, 1000)
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+
+def parse_srt_time_to_ms(time_str: str) -> int:
+    try:
+        hms, ms = time_str.replace('.', ',').split(',')
+        h, m, s = map(int, hms.split(':'))
+        return (h * 3600 + m * 60 + s) * 1000 + int(ms)
+    except Exception:
+        return 0
 
 
 @app.errorhandler(413)
@@ -77,6 +89,59 @@ def transcribe():
         return jsonify({"error": "Audio transcription timed out"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/dubbing', methods=['POST'])
+def dubbing():
+    req = request.get_json(silent=True) or {}
+    subtitles = req.get('subtitles', [])
+    lang = req.get('lang', 'my')
+
+    if not subtitles:
+        return jsonify({"error": "Dubbing ပြုလုပ်ရန် စာတန်းထိုး မရှိပါ"}), 400
+
+    try:
+        # Sort subtitles by startTime to ensure chronological order just in case
+        sorted_subs = sorted(subtitles, key=lambda x: parse_srt_time_to_ms(x['startTime']))
+
+        last_sub = sorted_subs[-1]
+        total_duration_ms = parse_srt_time_to_ms(last_sub["endTime"])
+
+        # Give a small buffer at the end (e.g., 500ms)
+        combined_audio = AudioSegment.silent(duration=total_duration_ms + 500)
+
+        for sub in sorted_subs:
+            text = sub.get("translatedText") or sub.get("originalText") or ""
+            text = text.strip()
+            if not text:
+                continue
+
+            start_ms = parse_srt_time_to_ms(sub["startTime"])
+
+            # Generate TTS audio using gTTS
+            tts = gTTS(text=text, lang=lang)
+
+            audio_fp = io.BytesIO()
+            tts.write_to_fp(audio_fp)
+            audio_fp.seek(0)
+
+            # Load the generated audio via pydub
+            segment = AudioSegment.from_file(audio_fp, format="mp3")
+
+            # Overlay onto the main track
+            combined_audio = combined_audio.overlay(segment, position=start_ms)
+
+        out_fp = io.BytesIO()
+        combined_audio.export(out_fp, format="mp3")
+        out_fp.seek(0)
+
+        return send_file(
+            out_fp,
+            mimetype="audio/mpeg",
+            as_attachment=True,
+            download_name="dubbing.mp3"
+        )
+    except Exception as e:
+        return jsonify({"error": f"Dubbing error: {str(e)}"}), 500
 
 @app.route('/api/translate', methods=['POST'])
 def translate():
@@ -504,6 +569,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <button class="btn-translate" onclick="startTranslation()" id="btnTranslate">Translate All ⚡</button>
       <button class="btn-export" onclick="downloadOriginalSRT()">Orig .SRT</button>
       <button class="btn-export" onclick="downloadTranslatedSRT()">Trans .SRT</button>
+      <button class="btn-export" onclick="downloadDubbing()" style="background: #e11d48; font-weight: bold;">🎙️ Dub</button>
     </div>
   </footer>
 
@@ -1081,6 +1147,47 @@ HTML_PAGE = """<!DOCTYPE html>
       if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.translatedText || s.originalText}\\n`).join('\\n');
       askDownloadName(out, `${uploadedFileName}_translated`);
+    }
+
+    async function downloadDubbing() {
+      if (!subtitles.length) return alert("စာတန်းထိုး မရှိသေးပါ");
+
+      const btn = document.querySelector('button[onclick="downloadDubbing()"]');
+      const origText = btn.innerHTML;
+      btn.innerHTML = "⏳ Wait...";
+      btn.disabled = true;
+      setStatus("Dubbing အသံဖိုင် ဖန်တီးနေပါသည်... စောင့်ပေးပါ...");
+
+      try {
+        const res = await fetch('/api/dubbing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subtitles: subtitles, lang: 'my' })
+        });
+
+        if (!res.ok) {
+          let errData;
+          try { errData = await res.json(); } catch(e) {}
+          throw new Error(errData?.error || "Dubbing failed");
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${uploadedFileName}_dubbing.mp3`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        setStatus("Dubbing အသံဖိုင် ရရှိပါပြီ!", 4000);
+      } catch (err) {
+        alert("Error: " + err.message);
+        setStatus("Dubbing ဖန်တီးခြင်း မအောင်မြင်ပါ", 4000);
+      } finally {
+        btn.innerHTML = origText;
+        btn.disabled = false;
+      }
     }
 
     function askDownloadName(content, defaultName) {
