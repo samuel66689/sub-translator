@@ -788,6 +788,8 @@ HTML_PAGE = """<!DOCTYPE html>
       e.target.value = '';
       if (!file) return;
 
+      const MAX_WHISPER_SIZE = 25 * 1024 * 1024; // 25 MB
+
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
@@ -809,6 +811,11 @@ HTML_PAGE = """<!DOCTYPE html>
       } else if (attachOnly) {
         setStatus("Video ကို SRT နှင့် တွဲထည့်ပြီးပါပြီ", 3000);
       } else {
+        if (file.size > MAX_WHISPER_SIZE) {
+          alert("Groq Whisper API သည် 25MB ထက်ကြီးသော ဖိုင်များကို လက်မခံပါ။ ဖိုင်ဆိုဒ်သေးအောင် လုပ်ပြီးမှ ပြန်တင်ပေးပါ။");
+          return;
+        }
+
         const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
         if (!groqKey) {
           alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu ထဲက Guide ကို ဖတ်၍ အခမဲ့ ယူနိုင်ပါသည်ခင်ဗျာ။");
