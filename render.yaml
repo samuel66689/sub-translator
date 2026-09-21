@@ -3,5 +3,4 @@ services:
     name: sub-translator
     env: python
     buildCommand: "./build.sh"
-    # Use standard threaded worker for WSGI flask app with async endpoints (asgiref handles async internally)
-    startCommand: "PATH=$PATH:$(pwd)/bin gunicorn app:app --threads 4"
+    startCommand: "gunicorn app:app --threads 4"
