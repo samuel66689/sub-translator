@@ -110,6 +110,15 @@ def translate():
         f"Do NOT alter or omit any IDs. Example: [{{\"id\": 1, \"translatedText\": \"မင်္ဂလာပါ\"}}]"
     )
 
+    glossary = "\n".join(
+        ln.strip() for ln in str(req.get('glossary') or '').splitlines() if ln.strip()
+    )[:4000]
+    if glossary:
+        system_prompt += (
+            " Glossary (source term = required translation): whenever a source term below appears, "
+            "translate it exactly as given and keep it consistent across all subtitles.\n" + glossary
+        )
+
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
     try:
@@ -242,7 +251,8 @@ HTML_PAGE = """<!DOCTYPE html>
 
     /* Video Player Box */
     #videoContainer {
-      display: none; position: relative; border-radius: 16px; overflow: hidden;
+      display: none; position: sticky; top: var(--header-h, 61px); z-index: 35;
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.45); border-radius: 16px; overflow: hidden;
       background: #000; border: 1px solid rgba(244, 114, 182, 0.3);
     }
     video { width: 100%; max-height: 240px; display: block; outline: none; }
@@ -351,6 +361,14 @@ HTML_PAGE = """<!DOCTYPE html>
       background: rgba(225, 29, 72, 0.1); border: 1px solid rgba(244, 114, 182, 0.2);
       border-radius: 12px; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; cursor: pointer;
     }
+
+    /* Follow-while-watching (Video နှင့်အတူ စာတန်းလိုက်ပြ / လိုက်ပြင်) */
+    #followBar { display: none; flex-wrap: wrap; justify-content: flex-start; gap: 8px 16px; }
+    .follow-opt { display: flex; align-items: center; gap: 6px; margin-bottom: 0; cursor: pointer; }
+    .follow-opt input { accent-color: #ec4899; width: 15px; height: 15px; }
+    .sub-item.active { border-color: #f472b6; background: rgba(78, 20, 54, 0.95); box-shadow: 0 0 0 1px #f472b6; }
+    .sub-orig[contenteditable] { white-space: pre-wrap; min-height: 1.4em; outline: none; border-radius: 6px; padding: 2px 4px; margin-left: -4px; margin-right: -4px; }
+    .sub-orig[contenteditable]:focus { background: rgba(244, 114, 182, 0.1); }
   </style>
 </head>
 <body>
@@ -383,13 +401,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <span>🔑</span> API Key ယူနည်း အသေးစိတ် Guide
     </div>
 
-    <a class="drawer-item" href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer">
-      <span>🌐</span> Google AI Studio Website ➔
-    </a>
 
-    <a class="drawer-item" href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer">
-      <span>⚡</span> Groq Cloud Console Website ➔
-    </a>
   </div>
 
   <div class="container">
@@ -467,6 +479,12 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Video Follow / Edit Options (Video တင်ထားမှသာ ပေါ်မည်) -->
+    <div class="sync-bar" id="followBar">
+      <label class="follow-opt"><input type="checkbox" id="optFollow" checked> 🎯 Video နှင့်အတူ စာတန်း လိုက်ပြမည်</label>
+      <label class="follow-opt"><input type="checkbox" id="optAutoPause" checked> ⏸ စာရေးလျှင် Video ရပ်မည်</label>
+    </div>
+
     <!-- Subtitle Cards List -->
     <div id="subList">
       <div class="card" style="text-align: center; padding: 40px 10px; color: #f472b6;">
@@ -540,6 +558,12 @@ HTML_PAGE = """<!DOCTYPE html>
           <input type="password" id="modalGroqKey" placeholder="gsk_...">
         </div>
 
+        <div>
+          <label>Glossary (နာမည် / စကားလုံး ပုံသေဘာသာပြန်ချက်)</label>
+          <textarea id="modalGlossary" rows="4" placeholder="John = ဂျွန်&#10;Hogwarts = ဟော့ဂွတ်"></textarea>
+          <div style="font-size: 10px; color: #f472b6; opacity: 0.8; margin-top: 4px;">တစ်ကြောင်းကို တစ်ခုစီ — မူရင်း = ဘာသာပြန်</div>
+        </div>
+
         <button class="upload-btn" onclick="saveSettings()" style="width: 100%; margin-top: 5px; padding: 11px;">
           Save Settings & Close
         </button>
@@ -585,6 +609,23 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Download File Name Modal -->
+  <div id="downloadModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-head">
+        <div style="font-size: 14px; font-weight: bold; color: #fff;">💾 Download ဖိုင်နာမည်</div>
+        <button class="close-btn" onclick="closeDownloadModal()">✕</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 12px;">
+        <div>
+          <label>ဖိုင်နာမည် (.srt ကို အလိုအလျောက် ထည့်ပေးမည်)</label>
+          <input type="text" id="downloadName" autocomplete="off" onkeydown="if (event.key === 'Enter') confirmDownload()">
+        </div>
+        <button class="upload-btn" onclick="confirmDownload()" style="width: 100%; padding: 11px;">Download ⬇</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     let subtitles = [];
     let isTranslating = false;
@@ -594,12 +635,18 @@ HTML_PAGE = """<!DOCTYPE html>
     let lastOverlayText = null;
     let statusTimer = null;
     let progressTimer = null;
+    let activeIdx = -1;
+    let lastUserScroll = 0;
+    let pendingDownload = null;
 
     const KEY_GROQ = 'thiri_koko_groq_key';
     const KEY_GEMINI = 'thiri_koko_gemini_key';
     const KEY_GEMINI_MODEL = 'thiri_koko_gemini_model';
     const KEY_BLOCK_SIZE = 'thiri_koko_block_size';
     const KEY_DELAY_SEC = 'thiri_koko_delay_sec';
+    const KEY_GLOSSARY = 'thiri_koko_glossary';
+    const KEY_FOLLOW = 'thiri_koko_follow';
+    const KEY_AUTOPAUSE = 'thiri_koko_autopause';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -635,6 +682,7 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('modalGeminiSelect').value = savedModel;
       document.getElementById('modalBlockSize').value = savedBlock;
       document.getElementById('modalDelaySec').value = savedDelay;
+      document.getElementById('modalGlossary').value = localStorage.getItem(KEY_GLOSSARY) || '';
 
       document.getElementById('footerModelName').innerText = savedModel;
       document.getElementById('footerBlockSize').innerText = savedBlock;
@@ -644,14 +692,43 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const video = document.getElementById('mainVideo');
       const overlay = document.getElementById('liveSubText');
+      const optFollow = document.getElementById('optFollow');
+      const optAutoPause = document.getElementById('optAutoPause');
+      const header = document.querySelector('header');
+
+      const setHeaderH = () => document.documentElement.style.setProperty('--header-h', `${header.offsetHeight}px`);
+      setHeaderH();
+      window.addEventListener('resize', setHeaderH);
+
+      optFollow.checked = localStorage.getItem(KEY_FOLLOW) !== '0';
+      optAutoPause.checked = localStorage.getItem(KEY_AUTOPAUSE) !== '0';
+      optFollow.addEventListener('change', () => localStorage.setItem(KEY_FOLLOW, optFollow.checked ? '1' : '0'));
+      optAutoPause.addEventListener('change', () => localStorage.setItem(KEY_AUTOPAUSE, optAutoPause.checked ? '1' : '0'));
+
+      // ကိုယ်တိုင် scroll လုပ်နေချိန် ၃ စက္ကန့် auto-follow မလုပ်ရန်
+      const markUserScroll = () => { lastUserScroll = Date.now(); };
+      window.addEventListener('wheel', markUserScroll, { passive: true });
+      window.addEventListener('touchmove', markUserScroll, { passive: true });
+
       video.addEventListener('timeupdate', () => {
         const cur = video.currentTime;
         const hit = timeIndex.find(x => cur >= x.st && cur <= x.et);
         const text = hit ? (hit.s.translatedText || hit.s.originalText) : '';
-        if (text === lastOverlayText) return;
-        lastOverlayText = text;
-        overlay.innerText = text;
-        overlay.style.display = text ? 'inline-block' : 'none';
+        if (text !== lastOverlayText) {
+          lastOverlayText = text;
+          overlay.innerText = text;
+          overlay.style.display = text ? 'inline-block' : 'none';
+        }
+        setActiveCue(calcActive(cur));
+      });
+      video.addEventListener('seeked', () => { lastUserScroll = 0; });
+
+      // စာရေးဖို့ နှိပ်လျှင် Video ရပ်ပြီး ထို card ကို Video အောက်တွင် ပြမည်
+      document.getElementById('subList').addEventListener('focusin', (e) => {
+        if (!currentVideoUrl || !e.target.matches('textarea, [contenteditable]')) return;
+        if (optAutoPause.checked && !video.paused) video.pause();
+        const card = e.target.closest('.sub-item');
+        if (card) setTimeout(() => scrollToCue(card, true), 250);
       });
     });
 
@@ -677,6 +754,7 @@ HTML_PAGE = """<!DOCTYPE html>
       localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
       localStorage.setItem(KEY_BLOCK_SIZE, blockSize);
       localStorage.setItem(KEY_DELAY_SEC, delaySec);
+      localStorage.setItem(KEY_GLOSSARY, document.getElementById('modalGlossary').value.trim());
 
       document.getElementById('footerModelName').innerText = selectedModel;
       document.getElementById('footerBlockSize').innerText = blockSize;
@@ -713,18 +791,23 @@ HTML_PAGE = """<!DOCTYPE html>
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
+      let attachOnly = false;
       if (['mp4', 'webm', 'mov'].includes(ext)) {
         const video = document.getElementById('mainVideo');
         if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
         currentVideoUrl = URL.createObjectURL(file);
         video.src = currentVideoUrl;
         document.getElementById('videoContainer').style.display = 'block';
+        document.getElementById('followBar').style.display = 'flex';
+        attachOnly = subtitles.length > 0 && confirm("Subtitle ရှိပြီးသား ဖြစ်ပါသည်။\\n\\nOK = Video ကို SRT နှင့် တိုက်စစ်ရန်သာ ထည့်မည် (Transcribe မလုပ်ပါ)\\nCancel = Whisper AI ဖြင့် Subtitle အသစ်ထုတ်မည် (ရှိပြီးသားကို အစားထိုးမည်)");
       }
 
       if (ext === 'srt') {
         const txt = await file.text();
         parseSRT(txt);
         setStatus("SRT file loaded!", 3000);
+      } else if (attachOnly) {
+        setStatus("Video ကို SRT နှင့် တွဲထည့်ပြီးပါပြီ", 3000);
       } else {
         const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
         if (!groqKey) {
@@ -797,8 +880,41 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    function calcActive(cur) {
+      let best = -1, bestSt = -1;
+      for (let i = 0; i < timeIndex.length; i++) {
+        const st = timeIndex[i].st;
+        if (st <= cur && st >= bestSt) { best = i; bestSt = st; }
+      }
+      return best;
+    }
+
+    function scrollToCue(el, force = false) {
+      if (!force) {
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+      }
+      const vc = document.getElementById('videoContainer');
+      const offset = document.querySelector('header').offsetHeight + (vc.offsetHeight || 0) + 8;
+      const top = el.getBoundingClientRect().top + window.scrollY - offset;
+      window.scrollTo({ top: Math.max(0, top), behavior: force ? 'auto' : 'smooth' });
+    }
+
+    function setActiveCue(idx) {
+      if (idx === activeIdx) return;
+      const box = document.getElementById('subList');
+      const prev = activeIdx >= 0 ? box.children[activeIdx] : null;
+      if (prev) prev.classList.remove('active');
+      activeIdx = idx;
+      const el = idx >= 0 ? box.children[idx] : null;
+      if (!el) return;
+      el.classList.add('active');
+      if (document.getElementById('optFollow').checked && Date.now() - lastUserScroll > 3000) scrollToCue(el);
+    }
+
     function renderList() {
       timeIndex = subtitles.map(s => ({ st: timeToSec(s.startTime), et: timeToSec(s.endTime), s }));
+      activeIdx = currentVideoUrl ? calcActive(document.getElementById('mainVideo').currentTime) : -1;
       const box = document.getElementById('subList');
       document.getElementById('subCount').innerText = subtitles.length;
 
@@ -808,12 +924,12 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       box.innerHTML = subtitles.map((s, idx) => `
-        <div class="sub-item">
+        <div class="sub-item${idx === activeIdx ? ' active' : ''}">
           <div class="sub-header">
             <span class="sub-id" onclick="seekVideoTo('${s.startTime}')">#${s.id} (${s.startTime.split(',')[0]}) ▶</span>
             <button class="btn-retrans" onclick="retranslateSingle(${s.id})">🔄 Re-translate</button>
           </div>
-          <div class="sub-orig">${escapeHtml(s.originalText)}</div>
+          <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim()">${escapeHtml(s.originalText)}</div>
           <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value">${escapeHtml(s.translatedText)}</textarea>
         </div>
       `).join('');
@@ -827,6 +943,7 @@ HTML_PAGE = """<!DOCTYPE html>
           subtitles: items.map(s => ({ id: s.id, originalText: s.originalText })),
           targetLang: document.getElementById('targetLang').value,
           toneStyle: document.getElementById('toneStyle').value,
+          glossary: localStorage.getItem(KEY_GLOSSARY) || '',
           modelName: modelName,
           apiKey: apiKey
         })
@@ -950,13 +1067,37 @@ HTML_PAGE = """<!DOCTYPE html>
     function downloadOriginalSRT() {
       if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.originalText}\\n`).join('\\n');
-      triggerDownload(out, `${uploadedFileName}_original.srt`);
+      askDownloadName(out, `${uploadedFileName}_original`);
     }
 
     function downloadTranslatedSRT() {
       if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.translatedText || s.originalText}\\n`).join('\\n');
-      triggerDownload(out, `${uploadedFileName}_translated.srt`);
+      askDownloadName(out, `${uploadedFileName}_translated`);
+    }
+
+    function askDownloadName(content, defaultName) {
+      pendingDownload = { content, defaultName };
+      const input = document.getElementById('downloadName');
+      input.value = defaultName;
+      document.getElementById('downloadModal').style.display = 'flex';
+      input.focus();
+      input.select();
+    }
+
+    function closeDownloadModal() {
+      document.getElementById('downloadModal').style.display = 'none';
+      pendingDownload = null;
+    }
+
+    function confirmDownload() {
+      if (!pendingDownload) return;
+      const name = document.getElementById('downloadName').value
+        .replace(/[\\\\/:*?"<>|]+/g, '')
+        .replace(/\\.srt$/i, '')
+        .trim() || pendingDownload.defaultName;
+      triggerDownload(pendingDownload.content, `${name}.srt`);
+      closeDownloadModal();
     }
 
     function triggerDownload(content, filename) {
