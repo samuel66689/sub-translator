@@ -1,8 +1,9 @@
 import io
 import re
 import json
+import asyncio
 import requests
-from gtts import gTTS
+import edge_tts
 from pydub import AudioSegment
 from flask import Flask, request, jsonify, Response, send_file
 
@@ -90,11 +91,19 @@ def transcribe():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+async def generate_edge_tts_audio(text, voice):
+    communicate = edge_tts.Communicate(text, voice)
+    audio_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data += chunk["data"]
+    return audio_data
+
 @app.route('/api/dubbing', methods=['POST'])
-def dubbing():
+async def dubbing():
     req = request.get_json(silent=True) or {}
     subtitles = req.get('subtitles', [])
-    lang = req.get('lang', 'my')
+    voice = req.get('voice', 'my-MM-ThihaNeural')
 
     if not subtitles:
         return jsonify({"error": "Dubbing ပြုလုပ်ရန် စာတန်းထိုး မရှိပါ"}), 400
@@ -117,12 +126,13 @@ def dubbing():
 
             start_ms = parse_srt_time_to_ms(sub["startTime"])
 
-            # Generate TTS audio using gTTS
-            tts = gTTS(text=text, lang=lang)
+            # Generate TTS audio using edge-tts
+            audio_bytes = await generate_edge_tts_audio(text, voice)
 
-            audio_fp = io.BytesIO()
-            tts.write_to_fp(audio_fp)
-            audio_fp.seek(0)
+            if not audio_bytes:
+                continue
+
+            audio_fp = io.BytesIO(audio_bytes)
 
             # Load the generated audio via pydub
             segment = AudioSegment.from_file(audio_fp, format="mp3")
@@ -615,6 +625,14 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
 
         <div>
+          <label>Dubbing အသံရွေးရန် (TTS Voice)</label>
+          <select id="modalDubbingVoice">
+            <option value="my-MM-ThihaNeural">Thiha (သီဟ - ယောကျ်ားလေးအသံ)</option>
+            <option value="my-MM-NilarNeural">Nilar (နီလာ - မိန်းကလေးအသံ)</option>
+          </select>
+        </div>
+
+        <div>
           <label>Gemini API Key</label>
           <input type="password" id="modalGeminiKey" placeholder="AIzaSy...">
         </div>
@@ -713,6 +731,7 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_GLOSSARY = 'thiri_koko_glossary';
     const KEY_FOLLOW = 'thiri_koko_follow';
     const KEY_AUTOPAUSE = 'thiri_koko_autopause';
+    const KEY_DUB_VOICE = 'thiri_koko_dub_voice';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -744,10 +763,12 @@ HTML_PAGE = """<!DOCTYPE html>
       const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
       const savedBlock = localStorage.getItem(KEY_BLOCK_SIZE) || '25';
       const savedDelay = localStorage.getItem(KEY_DELAY_SEC) || '15';
+      const savedDubVoice = localStorage.getItem(KEY_DUB_VOICE) || 'my-MM-ThihaNeural';
 
       document.getElementById('modalGeminiSelect').value = savedModel;
       document.getElementById('modalBlockSize').value = savedBlock;
       document.getElementById('modalDelaySec').value = savedDelay;
+      document.getElementById('modalDubbingVoice').value = savedDubVoice;
       document.getElementById('modalGlossary').value = localStorage.getItem(KEY_GLOSSARY) || '';
 
       document.getElementById('footerModelName').innerText = savedModel;
@@ -814,12 +835,14 @@ HTML_PAGE = """<!DOCTYPE html>
       const selectedModel = document.getElementById('modalGeminiSelect').value;
       const blockSize = document.getElementById('modalBlockSize').value;
       const delaySec = document.getElementById('modalDelaySec').value;
+      const dubVoice = document.getElementById('modalDubbingVoice').value;
 
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
       localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
       localStorage.setItem(KEY_BLOCK_SIZE, blockSize);
       localStorage.setItem(KEY_DELAY_SEC, delaySec);
+      localStorage.setItem(KEY_DUB_VOICE, dubVoice);
       localStorage.setItem(KEY_GLOSSARY, document.getElementById('modalGlossary').value.trim());
 
       document.getElementById('footerModelName').innerText = selectedModel;
@@ -1159,10 +1182,11 @@ HTML_PAGE = """<!DOCTYPE html>
       setStatus("Dubbing အသံဖိုင် ဖန်တီးနေပါသည်... စောင့်ပေးပါ...");
 
       try {
+        const voice = localStorage.getItem(KEY_DUB_VOICE) || 'my-MM-ThihaNeural';
         const res = await fetch('/api/dubbing', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subtitles: subtitles, lang: 'my' })
+          body: JSON.stringify({ subtitles: subtitles, voice: voice })
         });
 
         if (!res.ok) {
