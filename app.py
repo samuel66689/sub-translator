@@ -72,18 +72,20 @@ def transcribe():
                 err_msg = res.json().get('error', {}).get('message') or f'Groq Error ({res.status_code})'
             except Exception:
                 err_msg = f'Groq Error ({res.status_code})'
-            return jsonify({"error": err_msg}), 400
+            # Forward the real status (429/5xx/...) instead of always 400
+            return jsonify({"error": err_msg}), res.status_code
 
         segments = res.json().get('segments') or []
         items = [
             {
                 "id": idx,
-                "startTime": fmt_srt_time(seg['start']),
-                "endTime": fmt_srt_time(seg['end']),
-                "originalText": seg['text'].strip(),
+                "startTime": fmt_srt_time(float(seg.get('start') or 0)),
+                "endTime": fmt_srt_time(float(seg.get('end') or 0)),
+                "originalText": (seg.get('text') or '').strip(),
                 "translatedText": ""
             }
             for idx, seg in enumerate(segments, 1)
+            if isinstance(seg, dict)
         ]
         return jsonify({"subtitles": items})
     except requests.exceptions.Timeout:
@@ -99,49 +101,113 @@ async def generate_edge_tts_audio(text, voice):
             audio_data += chunk["data"]
     return audio_data
 
+
+# Only voices offered in the UI may be used (prevents abuse / weird failures)
+_ALLOWED_VOICES = frozenset({'my-MM-ThihaNeural', 'my-MM-NilarNeural'})
+_TTS_CONCURRENCY = 6      # parallel edge-tts requests
+_TTS_TIMEOUT = 120        # seconds per TTS request
+_TTS_CHUNK_LIMIT = 800    # chars per TTS request; long lines are split
+_MAX_SPEEDUP = 1.35       # max TTS speed-up to fit a subtitle time slot
+
+
+def chunk_text_for_tts(text: str, limit: int = _TTS_CHUNK_LIMIT):
+    """Split long subtitle text into sentence-boundary chunks for TTS."""
+    parts = [p for p in re.split(r'(?<=[။.!?!\n])\s+', text.strip()) if p]
+    chunks, cur = [], ""
+    for p in parts:
+        if len(cur) + len(p) + 1 <= limit:
+            cur = (cur + " " + p).strip()
+        else:
+            if cur:
+                chunks.append(cur)
+            while len(p) > limit:  # hard-split a single overlong sentence
+                chunks.append(p[:limit])
+                p = p[limit:]
+            cur = p
+    if cur:
+        chunks.append(cur)
+    return chunks or [text]
+
+
+@app.route('/api/health')
+def health():
+    return jsonify({"ok": True})
+
+
 @app.route('/api/dubbing', methods=['POST'])
 async def dubbing():
     req = request.get_json(silent=True) or {}
     subtitles = req.get('subtitles', [])
     voice = req.get('voice', 'my-MM-ThihaNeural')
+    if voice not in _ALLOWED_VOICES:
+        voice = 'my-MM-ThihaNeural'
 
     if not subtitles:
         return jsonify({"error": "Dubbing ပြုလုပ်ရန် စာတန်းထိုး မရှိပါ"}), 400
 
     try:
         # Sort subtitles by startTime to ensure chronological order just in case
-        sorted_subs = sorted(subtitles, key=lambda x: parse_srt_time_to_ms(x['startTime']))
+        sorted_subs = sorted(subtitles, key=lambda x: parse_srt_time_to_ms(x.get('startTime') or '00:00:00,000'))
 
-        last_sub = sorted_subs[-1]
-        total_duration_ms = parse_srt_time_to_ms(last_sub["endTime"])
+        # Base track must cover the latest end time (not just the last-by-start cue)
+        total_duration_ms = max(
+            parse_srt_time_to_ms(s.get('endTime') or '00:00:00,000') for s in sorted_subs
+        )
+        # 24kHz matches edge-tts output so pydub doesn't resample everything
+        combined_audio = AudioSegment.silent(duration=total_duration_ms + 500, frame_rate=24000)
 
-        # Give a small buffer at the end (e.g., 500ms)
-        combined_audio = AudioSegment.silent(duration=total_duration_ms + 500)
-
-        for sub in sorted_subs:
-            text = sub.get("translatedText") or sub.get("originalText") or ""
-            text = text.strip()
+        # Flatten into (sub_index, chunk_index, text) jobs, then synthesize in parallel
+        jobs = []
+        for i, sub in enumerate(sorted_subs):
+            text = (sub.get("translatedText") or sub.get("originalText") or "").strip()
             if not text:
                 continue
+            for j, piece in enumerate(chunk_text_for_tts(text)):
+                jobs.append((i, j, piece))
 
-            start_ms = parse_srt_time_to_ms(sub["startTime"])
+        sem = asyncio.Semaphore(_TTS_CONCURRENCY)
 
-            # Generate TTS audio using edge-tts
-            audio_bytes = await generate_edge_tts_audio(text, voice)
+        async def synth_job(text):
+            async with sem:
+                try:
+                    return await asyncio.wait_for(
+                        generate_edge_tts_audio(text, voice), timeout=_TTS_TIMEOUT
+                    )
+                except Exception:
+                    return b""  # one failed chunk must not kill the whole job
 
-            if not audio_bytes:
+        audio_blobs = await asyncio.gather(*(synth_job(t) for _, _, t in jobs))
+
+        # Reassemble chunks per subtitle, in order
+        per_sub = {}
+        for (i, j, _), blob in zip(jobs, audio_blobs):
+            per_sub.setdefault(i, []).append((j, blob))
+
+        for i in sorted(per_sub):
+            sub = sorted_subs[i]
+            segment = AudioSegment.silent(duration=0, frame_rate=24000)
+            for _, blob in sorted(per_sub[i]):
+                if not blob:
+                    continue
+                segment += AudioSegment.from_file(io.BytesIO(blob), format="mp3")
+            if len(segment) == 0:
                 continue
 
-            audio_fp = io.BytesIO(audio_bytes)
-
-            # Load the generated audio via pydub
-            segment = AudioSegment.from_file(audio_fp, format="mp3")
+            start_ms = parse_srt_time_to_ms(sub.get('startTime') or '00:00:00,000')
+            end_ms = parse_srt_time_to_ms(sub.get('endTime') or '00:00:00,000')
+            slot_ms = max(0, end_ms - start_ms - 120)  # 120ms breathing room
+            if slot_ms > 0 and len(segment) > slot_ms:
+                speed = len(segment) / slot_ms
+                if speed <= _MAX_SPEEDUP:
+                    segment = segment.speedup(playback_speed=speed)
+                else:
+                    segment = segment.speedup(playback_speed=_MAX_SPEEDUP)[:slot_ms]
 
             # Overlay onto the main track
             combined_audio = combined_audio.overlay(segment, position=start_ms)
 
         out_fp = io.BytesIO()
-        combined_audio.export(out_fp, format="mp3")
+        combined_audio.export(out_fp, format="mp3", bitrate="128k")
         out_fp.seek(0)
 
         return send_file(
@@ -817,6 +883,13 @@ HTML_PAGE = """<!DOCTYPE html>
         const card = e.target.closest('.sub-item');
         if (card) setTimeout(() => scrollToCue(card, true), 250);
       });
+
+      // ESC နှိပ်ရင် modal/drawer တွေ ပိတ်ရန်
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          closeSettingsModal(); closeGuideModal(); closeDownloadModal(); toggleDrawer(false);
+        }
+      });
     });
 
     function toggleDrawer(open) {
@@ -1008,6 +1081,21 @@ HTML_PAGE = """<!DOCTYPE html>
       if (document.getElementById('optFollow').checked && Date.now() - lastUserScroll > 3000) scrollToCue(el);
     }
 
+    // Chunk တစ်ခုပြီးတိုင်း renderList() အပြည့်ပြန်ခေါ်ရင် user ရိုက်နေတဲ့စာ ပျက်သွားမယ်။
+    // ဒါကြောင့် ဘာသာပြန်ပြီးတဲ့ textarea တွေကိုပဲ in-place update လုပ်တယ်။
+    function refreshTranslatedTexts() {
+      const box = document.getElementById('subList');
+      subtitles.forEach((s, idx) => {
+        const card = box.children[idx];
+        if (!card || !card.classList.contains('sub-item')) return;
+        const ta = card.querySelector('textarea');
+        if (ta && document.activeElement !== ta && ta.value !== s.translatedText) {
+          ta.value = s.translatedText;
+        }
+      });
+      document.getElementById('subCount').innerText = subtitles.length;
+    }
+
     function renderList() {
       timeIndex = subtitles.map(s => ({ st: timeToSec(s.startTime), et: timeToSec(s.endTime), s }));
       activeIdx = currentVideoUrl ? calcActive(document.getElementById('mainVideo').currentTime) : -1;
@@ -1022,7 +1110,7 @@ HTML_PAGE = """<!DOCTYPE html>
       box.innerHTML = subtitles.map((s, idx) => `
         <div class="sub-item${idx === activeIdx ? ' active' : ''}">
           <div class="sub-header">
-            <span class="sub-id" onclick="seekVideoTo('${s.startTime}')">#${s.id} (${s.startTime.split(',')[0]}) ▶</span>
+            <span class="sub-id" data-start="${escapeHtml(s.startTime)}" onclick="seekVideoTo(this.dataset.start)">#${s.id} (${escapeHtml(s.startTime.split(',')[0])}) ▶</span>
             <button class="btn-retrans" onclick="retranslateSingle(${s.id})">🔄 Re-translate</button>
           </div>
           <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim()">${escapeHtml(s.originalText)}</div>
@@ -1072,8 +1160,9 @@ HTML_PAGE = """<!DOCTYPE html>
       try {
         const translations = await requestTranslation([item], modelName, geminiKey);
 
-        if (translations[0]) {
-          item.translatedText = translations[0].translatedText;
+        const match = translations.find(t => Number(t.id) === subId) || translations[0];
+        if (match) {
+          item.translatedText = match.translatedText;
           renderList();
           setStatus(`#${subId} အသစ်ပြန်ဆိုပြီးပါပြီ!`, 3000);
         }
@@ -1110,6 +1199,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const byId = new Map(subtitles.map(s => [s.id, s]));
       let completedCount = subtitles.length - pending.length;
+      const failedIds = [];
       updateProgress(completedCount, subtitles.length);
 
       for (let i = 0; i < pending.length; i += chunkSize) {
@@ -1126,13 +1216,14 @@ HTML_PAGE = """<!DOCTYPE html>
             const translations = await requestTranslation(chunk, modelName, geminiKey);
 
             if (translations.length > 0) {
+              let applied = 0;
               translations.forEach(t => {
                 const item = byId.get(Number(t.id));
-                if (item) item.translatedText = t.translatedText;
+                if (item) { item.translatedText = t.translatedText; applied++; }
               });
-              completedCount += chunk.length;
+              completedCount += applied;
               updateProgress(completedCount, subtitles.length);
-              renderList();
+              refreshTranslatedTexts();  // ရိုက်နေတဲ့စာ မပျက်အောင် in-place update
             }
             success = true;
 
@@ -1153,11 +1244,26 @@ HTML_PAGE = """<!DOCTYPE html>
             await sleep(waitSec * 1000);
           }
         }
+
+        // ၃ ကြိမ်လုံး fail ရင် တိတ်တိတ်လေး မကျော်ဘဲ user ကို အသိပေး + ဆက်မယ်/ရပ်မယ် မေး
+        if (!success && isTranslating) {
+          failedIds.push(...chunk.map(s => s.id));
+          const goOn = confirm(
+            `#${chunk[0].id} မှ #${chunk[chunk.length - 1].id} ကို ၃ ကြိမ်လုံး ဘာသာပြန်မရပါ။\n\n` +
+            `OK = ကျန်တာတွေ ဆက်ဘာသာပြန်မယ်\nCancel = ဒီမှာတင် ရပ်မယ်`
+          );
+          if (!goOn) { isTranslating = false; break; }
+        }
       }
 
       isTranslating = false;
       document.getElementById('btnStop').style.display = 'none';
-      setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
+      if (failedIds.length) {
+        const shown = failedIds.slice(0, 10).join(', ') + (failedIds.length > 10 ? '…' : '');
+        setStatus(`ပြီးစီးပါပြီ — ${failedIds.length} ကြောင်း မအောင်မြင်ပါ (#${shown}). Re-translate နဲ့ တစ်ကြောင်းချင်း ပြန်လုပ်နိုင်ပါတယ်။`, 8000);
+      } else {
+        setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
+      }
     }
 
     function downloadOriginalSRT() {
@@ -1239,7 +1345,8 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function triggerDownload(content, filename) {
-      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      // BOM helps some Windows video players detect UTF-8 (Myanmar text)
+      const blob = new Blob(["\ufeff", content], { type: 'text/plain;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

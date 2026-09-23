@@ -3,5 +3,7 @@ services:
     name: sub-translator
     env: python
     buildCommand: "./build.sh"
-    # Use standard threaded worker for WSGI flask app with async endpoints (asgiref handles async internally)
-    startCommand: "PATH=$PATH:$(pwd)/bin gunicorn app:app --threads 4"
+    # Dubbing/transcribe requests can run for several minutes (parallel TTS),
+    # so the worker timeout must be well above gunicorn's 30s default.
+    # threads>1 lets one worker serve other requests while dubbing runs.
+    startCommand: "PATH=$PATH:$(pwd)/bin gunicorn app:app --workers 2 --threads 4 --timeout 600 --graceful-timeout 60"
