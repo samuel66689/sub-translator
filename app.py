@@ -178,44 +178,60 @@ async def dubbing():
 
         audio_blobs = await asyncio.gather(*(synth_job(t) for _, _, t in jobs))
 
+        failed_chunks = sum(1 for b in audio_blobs if not b)
+        if jobs and failed_chunks == len(jobs):
+            # TTS itself is unreachable (e.g. host blocks Microsoft TTS) —
+            # returning a silent MP3 would be worse than a clear error.
+            return jsonify({"error": "Dubbing error: TTS server ကို ဆက်သွယ်မရပါ။ Server ကနေ Microsoft TTS ကို block ထားနိုင်ပါတယ် — နောက်မှ ပြန်စမ်းကြည့်ပါ။"}), 500
+
         # Reassemble chunks per subtitle, in order
         per_sub = {}
         for (i, j, _), blob in zip(jobs, audio_blobs):
             per_sub.setdefault(i, []).append((j, blob))
 
+        failed_segments = 0
         for i in sorted(per_sub):
             sub = sorted_subs[i]
-            segment = AudioSegment.silent(duration=0, frame_rate=24000)
-            for _, blob in sorted(per_sub[i]):
-                if not blob:
+            try:
+                segment = AudioSegment.silent(duration=0, frame_rate=24000)
+                for _, blob in sorted(per_sub[i]):
+                    if not blob:
+                        continue
+                    segment += AudioSegment.from_file(io.BytesIO(blob), format="mp3")
+                if len(segment) == 0:
                     continue
-                segment += AudioSegment.from_file(io.BytesIO(blob), format="mp3")
-            if len(segment) == 0:
+
+                start_ms = parse_srt_time_to_ms(sub.get('startTime') or '00:00:00,000')
+                end_ms = parse_srt_time_to_ms(sub.get('endTime') or '00:00:00,000')
+                slot_ms = max(0, end_ms - start_ms - 120)  # 120ms breathing room
+                if slot_ms > 0 and len(segment) > slot_ms:
+                    speed = len(segment) / slot_ms
+                    if speed <= _MAX_SPEEDUP:
+                        segment = segment.speedup(playback_speed=speed)
+                    else:
+                        segment = segment.speedup(playback_speed=_MAX_SPEEDUP)[:slot_ms]
+
+                # Overlay onto the main track
+                combined_audio = combined_audio.overlay(segment, position=start_ms)
+            except Exception:
+                # One bad segment (corrupt audio, speedup failure, ...) must not
+                # kill the whole dubbing job — skip it and keep going.
+                failed_segments += 1
                 continue
-
-            start_ms = parse_srt_time_to_ms(sub.get('startTime') or '00:00:00,000')
-            end_ms = parse_srt_time_to_ms(sub.get('endTime') or '00:00:00,000')
-            slot_ms = max(0, end_ms - start_ms - 120)  # 120ms breathing room
-            if slot_ms > 0 and len(segment) > slot_ms:
-                speed = len(segment) / slot_ms
-                if speed <= _MAX_SPEEDUP:
-                    segment = segment.speedup(playback_speed=speed)
-                else:
-                    segment = segment.speedup(playback_speed=_MAX_SPEEDUP)[:slot_ms]
-
-            # Overlay onto the main track
-            combined_audio = combined_audio.overlay(segment, position=start_ms)
 
         out_fp = io.BytesIO()
         combined_audio.export(out_fp, format="mp3", bitrate="128k")
         out_fp.seek(0)
 
-        return send_file(
+        resp = send_file(
             out_fp,
             mimetype="audio/mpeg",
             as_attachment=True,
             download_name="dubbing.mp3"
         )
+        if failed_chunks or failed_segments:
+            resp.headers["X-Dubbing-Failed-Chunks"] = str(failed_chunks + failed_segments)
+        return resp
     except Exception as e:
         return jsonify({"error": f"Dubbing error: {str(e)}"}), 500
 
@@ -645,6 +661,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <button class="btn-translate" onclick="startTranslation()" id="btnTranslate">Translate All ⚡</button>
       <button class="btn-export" onclick="downloadOriginalSRT()">Orig .SRT</button>
       <button class="btn-export" onclick="downloadTranslatedSRT()">Trans .SRT</button>
+      <button class="btn-export" onclick="autoSplitLongLines()" title="ရှည်လွန်းသောစာကြောင်းများ အလိုအလျောက်ခွဲမယ်">✂️ Auto-split</button>
       <button class="btn-export" onclick="downloadDubbing()" style="background: #e11d48; font-weight: bold;">🎙️ Dub</button>
     </div>
   </footer>
@@ -1096,6 +1113,156 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('subCount').innerText = subtitles.length;
     }
 
+    // ---------- Merge / Split subtitles ----------
+    const SPLIT_LIMIT = 110;   // auto-split threshold (chars)
+    const SPLIT_MIN_MS = 400;  // each split part keeps at least this much time
+
+    function renumberSubtitles() {
+      subtitles.forEach((s, i) => { s.id = i + 1; });
+    }
+
+    function parseSrtToMs(t) {
+      try { return Math.max(0, Math.round(timeToSec(t) * 1000)); }
+      catch (e) { return 0; }
+    }
+    function fmtSrt(ms) { return secToTime(ms / 1000); }
+
+    // textarea / contenteditable ထဲက လက်ရှိစာကို model ထဲ ပြန်သိမ်း
+    function syncCardToModel(idx) {
+      const card = document.getElementById('subList').children[idx];
+      if (!card || !card.classList.contains('sub-item') || !subtitles[idx]) return;
+      const ta = card.querySelector('textarea');
+      const orig = card.querySelector('.sub-orig');
+      if (ta) subtitles[idx].translatedText = ta.value;
+      if (orig) subtitles[idx].originalText = orig.innerText.trim();
+    }
+    function syncAllCards() {
+      subtitles.forEach((_, idx) => syncCardToModel(idx));
+    }
+
+    function joinText(x, y) {
+      x = (x || '').trim(); y = (y || '').trim();
+      return (x && y) ? x + ' ' + y : (x || y);
+    }
+
+    // pos အနီးဆုံး စာကြောင်း/စကားလုံး အဆုံးသတ်နေရာကို ရှာ
+    function snapCut(text, pos) {
+      pos = Math.max(1, Math.min(text.length - 1, Math.round(pos)));
+      const sent = /[။.!?!\n]/g;
+      let m, best = -1;
+      while ((m = sent.exec(text))) {
+        const p = m.index + 1;
+        if (Math.abs(p - pos) < Math.abs(best - pos)) best = p;
+      }
+      if (best > 0 && best < text.length && Math.abs(best - pos) < 40) return best;
+      const fwd = text.indexOf(' ', pos), bwd = text.lastIndexOf(' ', pos);
+      if (fwd === -1) return bwd > 0 ? bwd : pos;
+      if (bwd === -1) return fwd;
+      return (pos - bwd <= fwd - pos) ? bwd : fwd;
+    }
+
+    function splitTimeProportionally(startMs, endMs, len1, len2) {
+      const dur = Math.max(1, endMs - startMs);
+      const ratio = len1 / Math.max(1, len1 + len2);
+      let b = startMs + Math.round(dur * ratio);
+      if (b - startMs < SPLIT_MIN_MS) b = startMs + SPLIT_MIN_MS;
+      if (endMs - b < SPLIT_MIN_MS) b = endMs - SPLIT_MIN_MS;
+      if (b <= startMs || b >= endMs) b = startMs + Math.floor(dur / 2);
+      return Math.max(startMs + 1, Math.min(endMs - 1, b));
+    }
+
+    // Model-only split (DOM မထိ). cutPos > 0 ဆို cursor နေရာ အတိအကျ၊ မဟုတ်ရင် auto.
+    function splitModelAt(idx, cutPos) {
+      const s = subtitles[idx];
+      if (!s) return false;
+      const primary = (s.translatedText || '').trim() ? 'translatedText' : 'originalText';
+      const other = primary === 'translatedText' ? 'originalText' : 'translatedText';
+      const text = (s[primary] || '').trim();
+      if (text.length < 2) return false;
+
+      const cut = (cutPos > 0 && cutPos < text.length)
+        ? Math.floor(cutPos)
+        : snapCut(text, text.length / 2);
+      const t1 = text.slice(0, cut).trim(), t2 = text.slice(cut).trim();
+      if (!t1 || !t2) return false;
+
+      const startMs = parseSrtToMs(s.startTime), endMs = parseSrtToMs(s.endTime);
+      const boundary = splitTimeProportionally(startMs, endMs, t1.length, t2.length);
+
+      // ကျန်တစ်ဖက်စာသားကိုလည်း အချိုးကျ ခွဲ (မခွဲနိုင်ရင် အတိုင်းထား)
+      const otext = (s[other] || '').trim();
+      let o1 = '', o2 = '';
+      if (otext) {
+        const oc = snapCut(otext, otext.length * (cut / text.length));
+        o1 = otext.slice(0, oc).trim(); o2 = otext.slice(oc).trim();
+        if (!o1 || !o2) { o1 = otext; o2 = ''; }
+      }
+
+      const oldEnd = s.endTime;
+      const first = Object.assign({}, s, { endTime: fmtSrt(boundary) });
+      first[primary] = t1; first[other] = o1;
+      const second = { id: 0, startTime: fmtSrt(boundary), endTime: oldEnd, originalText: '', translatedText: '' };
+      second[primary] = t2; second[other] = o2;
+
+      subtitles[idx] = first;
+      subtitles.splice(idx + 1, 0, second);
+      return true;
+    }
+
+    // Card ပေါ်က ✂️ ခလုတ် — cursor နေရာမှာ ခွဲ၊ cursor မရှိရင် auto
+    function splitSubtitle(idx) {
+      if (isTranslating) return setStatus('ဘာသာပြန်နေတုန်း ပြင်ဆင်လို့မရပါ — ပြီးအောင်စောင့်ပါ', 3000);
+      syncCardToModel(idx);
+      const card = document.getElementById('subList').children[idx];
+      const ta = card ? card.querySelector('textarea') : null;
+      let cut = -1;
+      if (ta && document.activeElement === ta && ta.selectionStart > 0 && ta.selectionStart < ta.value.length) {
+        cut = ta.selectionStart;
+      }
+      if (splitModelAt(idx, cut)) {
+        renumberSubtitles();
+        renderList();
+        setStatus(`#${idx + 1} ကို ၂ ပိုင်းခွဲပြီးပါပြီ ✂️`, 2500);
+      } else {
+        setStatus('ခွဲ၍မရပါ — စာအရမ်းတိုနေနိုင်ပါတယ်', 3000);
+      }
+    }
+
+    // Card ပေါ်က 🔗 ခလုတ် — နောက်စာကြောင်းနဲ့ ပေါင်း
+    function mergeWithNext(idx) {
+      if (isTranslating) return setStatus('ဘာသာပြန်နေတုန်း ပြင်ဆင်လို့မရပါ — ပြီးအောင်စောင့်ပါ', 3000);
+      const a = subtitles[idx], b = subtitles[idx + 1];
+      if (!a || !b) return;
+      syncCardToModel(idx); syncCardToModel(idx + 1);
+      a.originalText = joinText(a.originalText, b.originalText);
+      a.translatedText = joinText(a.translatedText, b.translatedText);
+      a.endTime = b.endTime;
+      subtitles.splice(idx + 1, 1);
+      renumberSubtitles();
+      renderList();
+      setStatus(`#${a.id} ပေါင်းစပ်ပြီးပါပြီ 🔗`, 2500);
+    }
+
+    // Footer ခလုတ် — စာလုံး 110 ထက်ရှည်တဲ့ စာကြောင်းအားလုံး အလိုအလျောက်ခွဲ
+    function autoSplitLongLines() {
+      if (isTranslating) return setStatus('ဘာသာပြန်နေတုန်း ပြင်ဆင်လို့မရပါ — ပြီးအောင်စောင့်ပါ', 3000);
+      if (!subtitles.length) return;
+      syncAllCards();
+      let count = 0;
+      subtitles.forEach(s => { if ((s.translatedText || '').trim().length > SPLIT_LIMIT) count++; });
+      if (!count) return setStatus(`စာလုံး ${SPLIT_LIMIT} ထက်ရှည်သော စာကြောင်းမရှိပါ ✓`, 3000);
+      if (!confirm(`ရှည်လွန်းသော စာကြောင်း ${count} ကြောင်း တွေ့ပါတယ်။ အလိုအလျောက် ခွဲပေးမလား?`)) return;
+      let splits = 0, i = 0, guard = 0;
+      while (i < subtitles.length && guard++ < 5000) {
+        const t = (subtitles[i].translatedText || '').trim();
+        if (t.length > SPLIT_LIMIT && splitModelAt(i, -1)) { splits++; continue; }
+        i++;
+      }
+      renumberSubtitles();
+      renderList();
+      setStatus(`စာကြောင်း ${splits} ကြောင်း ခွဲပြီးပါပြီ ✂️`, 3500);
+    }
+
     function renderList() {
       timeIndex = subtitles.map(s => ({ st: timeToSec(s.startTime), et: timeToSec(s.endTime), s }));
       activeIdx = currentVideoUrl ? calcActive(document.getElementById('mainVideo').currentTime) : -1;
@@ -1112,6 +1279,8 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="sub-header">
             <span class="sub-id" data-start="${escapeHtml(s.startTime)}" onclick="seekVideoTo(this.dataset.start)">#${s.id} (${escapeHtml(s.startTime.split(',')[0])}) ▶</span>
             <button class="btn-retrans" onclick="retranslateSingle(${s.id})">🔄 Re-translate</button>
+            <button class="btn-retrans" onclick="splitSubtitle(${idx})" title="ဒီစာကြောင်းကို ၂ ပိုင်းခွဲမယ်">✂️</button>
+            ${idx < subtitles.length - 1 ? `<button class="btn-retrans" onclick="mergeWithNext(${idx})" title="နောက်စာကြောင်းနဲ့ ပေါင်းမယ်">🔗</button>` : ''}
           </div>
           <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim()">${escapeHtml(s.originalText)}</div>
           <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value">${escapeHtml(s.translatedText)}</textarea>
