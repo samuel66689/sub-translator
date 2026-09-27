@@ -993,7 +993,7 @@ HTML_PAGE = """<!DOCTYPE html>
     // pos အနီးဆုံး စာကြောင်း/စကားလုံး အဆုံးသတ်နေရာကို ရှာ
     function snapCut(text, pos) {
       pos = Math.max(1, Math.min(text.length - 1, Math.round(pos)));
-      const sent = /[။.!?!\n]/g;
+      const sent = /[။.!?!\\n]/g;
       let m, best = -1;
       while ((m = sent.exec(text))) {
         const p = m.index + 1;
@@ -1263,8 +1263,8 @@ HTML_PAGE = """<!DOCTYPE html>
         if (!success && isTranslating) {
           failedIds.push(...chunk.map(s => s.id));
           const goOn = confirm(
-            `#${chunk[0].id} မှ #${chunk[chunk.length - 1].id} ကို ၃ ကြိမ်လုံး ဘာသာပြန်မရပါ။\n\n` +
-            `OK = ကျန်တာတွေ ဆက်ဘာသာပြန်မယ်\nCancel = ဒီမှာတင် ရပ်မယ်`
+            `#${chunk[0].id} မှ #${chunk[chunk.length - 1].id} ကို ၃ ကြိမ်လုံး ဘာသာပြန်မရပါ။\\n\\n` +
+            `OK = ကျန်တာတွေ ဆက်ဘာသာပြန်မယ်\\nCancel = ဒီမှာတင် ရပ်မယ်`
           );
           if (!goOn) { isTranslating = false; break; }
         }
