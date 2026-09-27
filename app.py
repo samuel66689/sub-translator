@@ -1,11 +1,7 @@
-import io
 import re
 import json
-import asyncio
 import requests
-import edge_tts
-from pydub import AudioSegment
-from flask import Flask, request, jsonify, Response, send_file
+from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
 # 100MB Upload limit for video/audio
@@ -93,147 +89,10 @@ def transcribe():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-async def generate_edge_tts_audio(text, voice):
-    communicate = edge_tts.Communicate(text, voice)
-    audio_data = b""
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_data += chunk["data"]
-    return audio_data
-
-
-# Only voices offered in the UI may be used (prevents abuse / weird failures)
-_ALLOWED_VOICES = frozenset({'my-MM-ThihaNeural', 'my-MM-NilarNeural'})
-_TTS_CONCURRENCY = 6      # parallel edge-tts requests
-_TTS_TIMEOUT = 120        # seconds per TTS request
-_TTS_CHUNK_LIMIT = 800    # chars per TTS request; long lines are split
-_MAX_SPEEDUP = 1.35       # max TTS speed-up to fit a subtitle time slot
-
-
-def chunk_text_for_tts(text: str, limit: int = _TTS_CHUNK_LIMIT):
-    """Split long subtitle text into sentence-boundary chunks for TTS."""
-    parts = [p for p in re.split(r'(?<=[။.!?!\n])\s+', text.strip()) if p]
-    chunks, cur = [], ""
-    for p in parts:
-        if len(cur) + len(p) + 1 <= limit:
-            cur = (cur + " " + p).strip()
-        else:
-            if cur:
-                chunks.append(cur)
-            while len(p) > limit:  # hard-split a single overlong sentence
-                chunks.append(p[:limit])
-                p = p[limit:]
-            cur = p
-    if cur:
-        chunks.append(cur)
-    return chunks or [text]
-
-
 @app.route('/api/health')
 def health():
     return jsonify({"ok": True})
 
-
-@app.route('/api/dubbing', methods=['POST'])
-async def dubbing():
-    req = request.get_json(silent=True) or {}
-    subtitles = req.get('subtitles', [])
-    voice = req.get('voice', 'my-MM-ThihaNeural')
-    if voice not in _ALLOWED_VOICES:
-        voice = 'my-MM-ThihaNeural'
-
-    if not subtitles:
-        return jsonify({"error": "Dubbing ပြုလုပ်ရန် စာတန်းထိုး မရှိပါ"}), 400
-
-    try:
-        # Sort subtitles by startTime to ensure chronological order just in case
-        sorted_subs = sorted(subtitles, key=lambda x: parse_srt_time_to_ms(x.get('startTime') or '00:00:00,000'))
-
-        # Base track must cover the latest end time (not just the last-by-start cue)
-        total_duration_ms = max(
-            parse_srt_time_to_ms(s.get('endTime') or '00:00:00,000') for s in sorted_subs
-        )
-        # 24kHz matches edge-tts output so pydub doesn't resample everything
-        combined_audio = AudioSegment.silent(duration=total_duration_ms + 500, frame_rate=24000)
-
-        # Flatten into (sub_index, chunk_index, text) jobs, then synthesize in parallel
-        jobs = []
-        for i, sub in enumerate(sorted_subs):
-            text = (sub.get("translatedText") or sub.get("originalText") or "").strip()
-            if not text:
-                continue
-            for j, piece in enumerate(chunk_text_for_tts(text)):
-                jobs.append((i, j, piece))
-
-        sem = asyncio.Semaphore(_TTS_CONCURRENCY)
-
-        async def synth_job(text):
-            async with sem:
-                try:
-                    return await asyncio.wait_for(
-                        generate_edge_tts_audio(text, voice), timeout=_TTS_TIMEOUT
-                    )
-                except Exception:
-                    return b""  # one failed chunk must not kill the whole job
-
-        audio_blobs = await asyncio.gather(*(synth_job(t) for _, _, t in jobs))
-
-        failed_chunks = sum(1 for b in audio_blobs if not b)
-        if jobs and failed_chunks == len(jobs):
-            # TTS itself is unreachable (e.g. host blocks Microsoft TTS) —
-            # returning a silent MP3 would be worse than a clear error.
-            return jsonify({"error": "Dubbing error: TTS server ကို ဆက်သွယ်မရပါ။ Server ကနေ Microsoft TTS ကို block ထားနိုင်ပါတယ် — နောက်မှ ပြန်စမ်းကြည့်ပါ။"}), 500
-
-        # Reassemble chunks per subtitle, in order
-        per_sub = {}
-        for (i, j, _), blob in zip(jobs, audio_blobs):
-            per_sub.setdefault(i, []).append((j, blob))
-
-        failed_segments = 0
-        for i in sorted(per_sub):
-            sub = sorted_subs[i]
-            try:
-                segment = AudioSegment.silent(duration=0, frame_rate=24000)
-                for _, blob in sorted(per_sub[i]):
-                    if not blob:
-                        continue
-                    segment += AudioSegment.from_file(io.BytesIO(blob), format="mp3")
-                if len(segment) == 0:
-                    continue
-
-                start_ms = parse_srt_time_to_ms(sub.get('startTime') or '00:00:00,000')
-                end_ms = parse_srt_time_to_ms(sub.get('endTime') or '00:00:00,000')
-                slot_ms = max(0, end_ms - start_ms - 120)  # 120ms breathing room
-                if slot_ms > 0 and len(segment) > slot_ms:
-                    speed = len(segment) / slot_ms
-                    if speed <= _MAX_SPEEDUP:
-                        segment = segment.speedup(playback_speed=speed)
-                    else:
-                        segment = segment.speedup(playback_speed=_MAX_SPEEDUP)[:slot_ms]
-
-                # Overlay onto the main track
-                combined_audio = combined_audio.overlay(segment, position=start_ms)
-            except Exception:
-                # One bad segment (corrupt audio, speedup failure, ...) must not
-                # kill the whole dubbing job — skip it and keep going.
-                failed_segments += 1
-                continue
-
-        out_fp = io.BytesIO()
-        combined_audio.export(out_fp, format="mp3", bitrate="128k")
-        out_fp.seek(0)
-
-        resp = send_file(
-            out_fp,
-            mimetype="audio/mpeg",
-            as_attachment=True,
-            download_name="dubbing.mp3"
-        )
-        if failed_chunks or failed_segments:
-            resp.headers["X-Dubbing-Failed-Chunks"] = str(failed_chunks + failed_segments)
-        return resp
-    except Exception as e:
-        return jsonify({"error": f"Dubbing error: {str(e)}"}), 500
 
 @app.route('/api/translate', methods=['POST'])
 def translate():
@@ -662,7 +521,6 @@ HTML_PAGE = """<!DOCTYPE html>
       <button class="btn-export" onclick="downloadOriginalSRT()">Orig .SRT</button>
       <button class="btn-export" onclick="downloadTranslatedSRT()">Trans .SRT</button>
       <button class="btn-export" onclick="autoSplitLongLines()" title="ရှည်လွန်းသောစာကြောင်းများ အလိုအလျောက်ခွဲမယ်">✂️ Auto-split</button>
-      <button class="btn-export" onclick="downloadDubbing()" style="background: #e11d48; font-weight: bold;">🎙️ Dub</button>
     </div>
   </footer>
 
@@ -705,14 +563,6 @@ HTML_PAGE = """<!DOCTYPE html>
               <option value="30">30s (RPM 2 နှုန်း)</option>
             </select>
           </div>
-        </div>
-
-        <div>
-          <label>Dubbing အသံရွေးရန် (TTS Voice)</label>
-          <select id="modalDubbingVoice">
-            <option value="my-MM-ThihaNeural">Thiha (သီဟ - ယောကျ်ားလေးအသံ)</option>
-            <option value="my-MM-NilarNeural">Nilar (နီလာ - မိန်းကလေးအသံ)</option>
-          </select>
         </div>
 
         <div>
@@ -814,7 +664,6 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_GLOSSARY = 'thiri_koko_glossary';
     const KEY_FOLLOW = 'thiri_koko_follow';
     const KEY_AUTOPAUSE = 'thiri_koko_autopause';
-    const KEY_DUB_VOICE = 'thiri_koko_dub_voice';
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
@@ -846,12 +695,10 @@ HTML_PAGE = """<!DOCTYPE html>
       const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
       const savedBlock = localStorage.getItem(KEY_BLOCK_SIZE) || '25';
       const savedDelay = localStorage.getItem(KEY_DELAY_SEC) || '15';
-      const savedDubVoice = localStorage.getItem(KEY_DUB_VOICE) || 'my-MM-ThihaNeural';
 
       document.getElementById('modalGeminiSelect').value = savedModel;
       document.getElementById('modalBlockSize').value = savedBlock;
       document.getElementById('modalDelaySec').value = savedDelay;
-      document.getElementById('modalDubbingVoice').value = savedDubVoice;
       document.getElementById('modalGlossary').value = localStorage.getItem(KEY_GLOSSARY) || '';
 
       document.getElementById('footerModelName').innerText = savedModel;
@@ -925,14 +772,12 @@ HTML_PAGE = """<!DOCTYPE html>
       const selectedModel = document.getElementById('modalGeminiSelect').value;
       const blockSize = document.getElementById('modalBlockSize').value;
       const delaySec = document.getElementById('modalDelaySec').value;
-      const dubVoice = document.getElementById('modalDubbingVoice').value;
 
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
       localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
       localStorage.setItem(KEY_BLOCK_SIZE, blockSize);
       localStorage.setItem(KEY_DELAY_SEC, delaySec);
-      localStorage.setItem(KEY_DUB_VOICE, dubVoice);
       localStorage.setItem(KEY_GLOSSARY, document.getElementById('modalGlossary').value.trim());
 
       document.getElementById('footerModelName').innerText = selectedModel;
@@ -1445,48 +1290,6 @@ HTML_PAGE = """<!DOCTYPE html>
       if (!subtitles.length) return;
       let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.translatedText || s.originalText}\\n`).join('\\n');
       askDownloadName(out, `${uploadedFileName}_translated`);
-    }
-
-    async function downloadDubbing() {
-      if (!subtitles.length) return alert("စာတန်းထိုး မရှိသေးပါ");
-
-      const btn = document.querySelector('button[onclick="downloadDubbing()"]');
-      const origText = btn.innerHTML;
-      btn.innerHTML = "⏳ Wait...";
-      btn.disabled = true;
-      setStatus("Dubbing အသံဖိုင် ဖန်တီးနေပါသည်... စောင့်ပေးပါ...");
-
-      try {
-        const voice = localStorage.getItem(KEY_DUB_VOICE) || 'my-MM-ThihaNeural';
-        const res = await fetch('/api/dubbing', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subtitles: subtitles, voice: voice })
-        });
-
-        if (!res.ok) {
-          let errData;
-          try { errData = await res.json(); } catch(e) {}
-          throw new Error(errData?.error || "Dubbing failed");
-        }
-
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${uploadedFileName}_dubbing.mp3`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        setStatus("Dubbing အသံဖိုင် ရရှိပါပြီ!", 4000);
-      } catch (err) {
-        alert("Error: " + err.message);
-        setStatus("Dubbing ဖန်တီးခြင်း မအောင်မြင်ပါ", 4000);
-      } finally {
-        btn.innerHTML = origText;
-        btn.disabled = false;
-      }
     }
 
     function askDownloadName(content, defaultName) {
