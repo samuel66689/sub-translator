@@ -1,11 +1,16 @@
 import re
+import os
 import json
+import shutil
+import tempfile
+import subprocess
 import requests
 from flask import Flask, request, jsonify, Response
 
 app = Flask(__name__)
-# 100MB Upload limit for video/audio
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+# 2GB upload limit — big files are streamed to disk, then ffmpeg extracts a
+# small mono mp3 for Groq (25MB API limit), so RAM stays flat.
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -49,29 +54,122 @@ def too_large(_e):
     return jsonify({"error": "ဖိုင်အရွယ်အစား 100MB ထက် မကျော်ရပါ"}), 413
 
 
+def _ffmpeg_bin():
+    """Static ffmpeg from build.sh (./bin), else system ffmpeg."""
+    local = os.path.join(os.getcwd(), 'bin', 'ffmpeg')
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return 'ffmpeg'
+
+
+def _ffprobe_bin():
+    local = os.path.join(os.getcwd(), 'bin', 'ffprobe')
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return local
+    return 'ffprobe'
+
+
+# Groq rejects files > 25MB — stay safely under it.
+_GROQ_MAX_BYTES = 24 * 1024 * 1024
+# At or under this size the original upload goes straight to Groq (old behavior).
+_DIRECT_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _groq_transcribe_file(path, filename, api_key):
+    """POST one audio file to Groq Whisper. Returns (segments, None) or (None, (msg, status))."""
+    with open(path, 'rb') as f:
+        files = {'file': (filename, f, 'audio/mpeg')}
+        data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
+        headers = {'Authorization': f'Bearer {api_key}'}
+        res = http.post(GROQ_URL, headers=headers, files=files, data=data, timeout=600)
+    if res.status_code != 200:
+        try:
+            err_msg = res.json().get('error', {}).get('message') or f'Groq Error ({res.status_code})'
+        except Exception:
+            err_msg = f'Groq Error ({res.status_code})'
+        return None, (err_msg, res.status_code)
+    return res.json().get('segments') or [], None
+
+
+def _audio_duration_sec(path):
+    try:
+        p = subprocess.run([_ffprobe_bin(), '-v', 'error', '-show_entries', 'format=duration',
+                            '-of', 'default=noprint_wrappers=1:nokey=1', path],
+                           capture_output=True, text=True, timeout=60)
+        return float(p.stdout.strip())
+    except Exception:
+        return os.path.getsize(path) / 4000.0  # fallback: ~32 kbit/s
+
+
+def _transcribe_chunked(audio_path, api_key):
+    """Split very long audio into ~20MB pieces, transcribe each, re-offset timestamps."""
+    dur = _audio_duration_sec(audio_path)
+    chunk_sec = (20 * 1024 * 1024) / 4000.0  # ~5242s at 32 kbit/s mono
+    n = max(2, int(dur // chunk_sec) + 1)
+    step = dur / n
+    tmpdir = os.path.dirname(audio_path)
+    all_segs = []
+    for i in range(n):
+        start = i * step
+        chunk = os.path.join(tmpdir, f'chunk{i}.mp3')
+        p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error',
+                            '-ss', f'{start:.2f}', '-t', f'{step + 1:.2f}',
+                            '-i', audio_path, '-c', 'copy', chunk],
+                           capture_output=True, timeout=600)
+        if p.returncode != 0 or not os.path.isfile(chunk):
+            raise RuntimeError('အသံအပိုင်းခွဲမရပါ — ffmpeg error')
+        try:
+            segs, err = _groq_transcribe_file(chunk, f'chunk{i}.mp3', api_key)
+        finally:
+            if os.path.isfile(chunk):
+                os.remove(chunk)
+        if err:
+            raise RuntimeError(err[0])
+        for s in segs:
+            if isinstance(s, dict):
+                s['start'] = float(s.get('start') or 0) + start
+                s['end'] = float(s.get('end') or 0) + start
+                all_segs.append(s)
+    all_segs.sort(key=lambda s: s.get('start', 0))
+    return all_segs
+
+
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
     file = request.files.get('file')
-    api_key = request.form.get('apiKey', '').strip()
+    api_key = request.form.get('apiKey')
     if not file or not api_key:
         return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
 
+    tmpdir = tempfile.mkdtemp(prefix='sttrans_')
     try:
-        files = {'file': (file.filename, file.read(), file.content_type or 'application/octet-stream')}
-        data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
-        headers = {'Authorization': f'Bearer {api_key}'}
+        ext = os.path.splitext(file.filename or '')[1].lower()[:10]
+        in_path = os.path.join(tmpdir, 'upload' + ext)
+        file.save(in_path)  # streamed to disk — big files never sit in RAM
 
-        res = http.post(GROQ_URL, headers=headers, files=files, data=data, timeout=180)
+        audio_path = in_path
+        audio_name = file.filename or 'audio'
+        if os.path.getsize(in_path) > _DIRECT_MAX_BYTES:
+            # Big file (long video): extract a small mono mp3 with ffmpeg —
+            # same trick as audio-dub-studio — so Groq's 25MB limit is never hit.
+            audio_path = os.path.join(tmpdir, 'audio.mp3')
+            audio_name = 'audio.mp3'
+            p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error', '-i', in_path,
+                                '-vn', '-ar', '16000', '-ac', '1', '-b:a', '32k',
+                                audio_path],
+                               capture_output=True, text=True, timeout=1800)
+            os.remove(in_path)
+            if p.returncode != 0 or not os.path.isfile(audio_path):
+                return jsonify({"error": "ffmpeg နဲ့ အသံထုတ်မရပါ — ဖိုင်မှာ အသံလမ်းကြောင်း (audio track) မရှိတာဖြစ်နိုင်ပါတယ်"}), 400
 
-        if res.status_code != 200:
-            try:
-                err_msg = res.json().get('error', {}).get('message') or f'Groq Error ({res.status_code})'
-            except Exception:
-                err_msg = f'Groq Error ({res.status_code})'
-            # Forward the real status (429/5xx/...) instead of always 400
-            return jsonify({"error": err_msg}), res.status_code
+        if os.path.getsize(audio_path) <= _GROQ_MAX_BYTES:
+            segments, err = _groq_transcribe_file(audio_path, audio_name, api_key)
+            if err:
+                return jsonify({"error": err[0]}), err[1]
+        else:
+            # Still too big (roughly >87 min): transcribe in chunks and stitch.
+            segments = _transcribe_chunked(audio_path, api_key)
 
-        segments = res.json().get('segments') or []
         items = [
             {
                 "id": idx,
@@ -86,8 +184,13 @@ def transcribe():
         return jsonify({"subtitles": items})
     except requests.exceptions.Timeout:
         return jsonify({"error": "Audio transcription timed out"}), 504
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 @app.route('/api/health')
 def health():
@@ -812,8 +915,6 @@ HTML_PAGE = """<!DOCTYPE html>
       e.target.value = '';
       if (!file) return;
 
-      const MAX_WHISPER_SIZE = 25 * 1024 * 1024; // 25 MB
-
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
 
@@ -835,11 +936,6 @@ HTML_PAGE = """<!DOCTYPE html>
       } else if (attachOnly) {
         setStatus("Video ကို SRT နှင့် တွဲထည့်ပြီးပါပြီ", 3000);
       } else {
-        if (file.size > MAX_WHISPER_SIZE) {
-          alert("Groq Whisper API သည် 25MB ထက်ကြီးသော ဖိုင်များကို လက်မခံပါ။ ဖိုင်ဆိုဒ်သေးအောင် လုပ်ပြီးမှ ပြန်တင်ပေးပါ။");
-          return;
-        }
-
         const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
         if (!groqKey) {
           alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu ထဲက Guide ကို ဖတ်၍ အခမဲ့ ယူနိုင်ပါသည်ခင်ဗျာ။");
@@ -847,7 +943,9 @@ HTML_PAGE = """<!DOCTYPE html>
           return;
         }
 
-        setStatus("Whisper AI ဖြင့် Subtitle ထုတ်ယူနေပါသည်...");
+        setStatus(file.size > 25 * 1024 * 1024
+          ? "ဖိုင်ကြီးနေလို့ server မှာ ffmpeg နဲ့ အသံအရင်ထုတ်ယူနေပါတယ်... ခဏစောင့်ပေးပါ"
+          : "Whisper AI ဖြင့် Subtitle ထုတ်ယူနေပါသည်...");
         const fd = new FormData();
         fd.append('file', file);
         fd.append('apiKey', groqKey);

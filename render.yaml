@@ -3,7 +3,8 @@ services:
     name: sub-translator
     env: python
     buildCommand: "./build.sh"
-    # Transcribe requests can run for several minutes, so the worker timeout
+    # Transcribe requests can run for a long time (ffmpeg audio extraction +
+    # chunked Groq transcription for big video files), so the worker timeout
     # must be well above gunicorn's 30s default.
     # threads>1 lets one worker serve other requests while one is busy.
-    startCommand: "gunicorn app:app --workers 2 --threads 4 --timeout 600 --graceful-timeout 60"
+    startCommand: "gunicorn app:app --workers 2 --threads 4 --timeout 1800 --graceful-timeout 120"
