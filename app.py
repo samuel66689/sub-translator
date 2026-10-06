@@ -79,7 +79,7 @@ def _groq_transcribe_file(path, filename, api_key):
     """POST one audio file to Groq Whisper. Returns (segments, None) or (None, (msg, status))."""
     with open(path, 'rb') as f:
         files = {'file': (filename, f, 'audio/mpeg')}
-        data = {'model': 'whisper-large-v3-turbo', 'response_format': 'verbose_json'}
+        data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
         headers = {'Authorization': f'Bearer {api_key}'}
         res = http.post(GROQ_URL, headers=headers, files=files, data=data, timeout=600)
     if res.status_code != 200:
@@ -98,13 +98,13 @@ def _audio_duration_sec(path):
                            capture_output=True, text=True, timeout=60)
         return float(p.stdout.strip())
     except Exception:
-        return os.path.getsize(path) / 4000.0  # fallback: ~32 kbit/s
+        return os.path.getsize(path) / 8000.0  # fallback: ~64 kbit/s
 
 
 def _transcribe_chunked(audio_path, api_key):
     """Split very long audio into ~20MB pieces, transcribe each, re-offset timestamps."""
     dur = _audio_duration_sec(audio_path)
-    chunk_sec = (20 * 1024 * 1024) / 4000.0  # ~5242s at 32 kbit/s mono
+    chunk_sec = (20 * 1024 * 1024) / 8000.0  # ~2621s at 64 kbit/s mono
     n = max(2, int(dur // chunk_sec) + 1)
     step = dur / n
     tmpdir = os.path.dirname(audio_path)
@@ -155,7 +155,7 @@ def transcribe():
             audio_path = os.path.join(tmpdir, 'audio.mp3')
             audio_name = 'audio.mp3'
             p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error', '-i', in_path,
-                                '-vn', '-ar', '16000', '-ac', '1', '-b:a', '32k',
+                                '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
                                 audio_path],
                                capture_output=True, text=True, timeout=1800)
             os.remove(in_path)
@@ -167,7 +167,7 @@ def transcribe():
             if err:
                 return jsonify({"error": err[0]}), err[1]
         else:
-            # Still too big (roughly >87 min): transcribe in chunks and stitch.
+            # Still too big (roughly >43 min): transcribe in chunks and stitch.
             segments = _transcribe_chunked(audio_path, api_key)
 
         items = [
