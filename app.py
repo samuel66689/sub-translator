@@ -1,11 +1,15 @@
 import re
 import os
+import glob
 import json
+import time
 import shutil
+import secrets
 import tempfile
 import subprocess
+import urllib.parse
 import requests
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 
 app = Flask(__name__)
 # 2GB upload limit — big files are streamed to disk, then ffmpeg extracts a
@@ -138,27 +142,42 @@ def _transcribe_chunked(audio_path, api_key):
 def transcribe():
     file = request.files.get('file')
     api_key = request.form.get('apiKey')
-    if not file or not api_key:
+    file_id = None
+    if file is None:
+        # JSON mode: video previously fetched via /api/fetch-url
+        j = request.get_json(silent=True) or {}
+        file_id = (j.get('fileId') or '').strip()
+        api_key = api_key or (j.get('apiKey') or '')
+    if not api_key or (file is None and not file_id):
         return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
 
-    tmpdir = tempfile.mkdtemp(prefix='sttrans_')
+    workdir = tempfile.mkdtemp(prefix='sttrans_')
+    from_fetch = False
     try:
-        ext = os.path.splitext(file.filename or '')[1].lower()[:10]
-        in_path = os.path.join(tmpdir, 'upload' + ext)
-        file.save(in_path)  # streamed to disk — big files never sit in RAM
+        if file_id:
+            in_path = _find_fetched(file_id)
+            if not in_path:
+                return jsonify({"error": "ဗီဒီယို သက်တမ်းကုန်သွားပါပြီ — link ကနေ ပြန် download လုပ်ပေးပါ"}), 404
+            from_fetch = True
+            audio_name = os.path.basename(in_path)
+        else:
+            ext = os.path.splitext(file.filename or '')[1].lower()[:10]
+            in_path = os.path.join(workdir, 'upload' + ext)
+            file.save(in_path)  # streamed to disk — big files never sit in RAM
+            audio_name = file.filename or 'audio'
 
         audio_path = in_path
-        audio_name = file.filename or 'audio'
         if os.path.getsize(in_path) > _DIRECT_MAX_BYTES:
             # Big file (long video): extract a small mono mp3 with ffmpeg —
             # same trick as audio-dub-studio — so Groq's 25MB limit is never hit.
-            audio_path = os.path.join(tmpdir, 'audio.mp3')
+            audio_path = os.path.join(workdir, 'audio.mp3')
             audio_name = 'audio.mp3'
             p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error', '-i', in_path,
                                 '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
                                 audio_path],
                                capture_output=True, text=True, timeout=1800)
-            os.remove(in_path)
+            if not from_fetch:
+                os.remove(in_path)  # fetched videos are kept for preview
             if p.returncode != 0 or not os.path.isfile(audio_path):
                 return jsonify({"error": "ffmpeg နဲ့ အသံထုတ်မရပါ — ဖိုင်မှာ အသံလမ်းကြောင်း (audio track) မရှိတာဖြစ်နိုင်ပါတယ်"}), 400
 
@@ -189,7 +208,109 @@ def transcribe():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+# ---------------- URL video download (yt-dlp) ----------------
+_FETCH_DIR = os.path.join(tempfile.gettempdir(), 'stfetch')
+os.makedirs(_FETCH_DIR, exist_ok=True)
+_FETCH_TTL_SEC = 6 * 3600        # downloaded videos kept 6h for preview / re-transcribe
+_MAX_DL_DURATION_SEC = 2 * 3600  # refuse videos longer than 2h
+_FID_RE = re.compile(r'^[A-Za-z0-9_-]{16,32}$')
+_ALLOWED_DL_HOSTS = (
+    'youtube.com', 'youtu.be',
+    'tiktok.com', 'vt.tiktok.com', 'vm.tiktok.com',
+    'douyin.com', 'v.douyin.com',
+    'xiaohongshu.com', 'xhslink.com',
+    'bilibili.com', 'b23.tv',
+)
+
+
+def _cleanup_fetch_dir():
+    try:
+        now = time.time()
+        for name in os.listdir(_FETCH_DIR):
+            p = os.path.join(_FETCH_DIR, name)
+            if os.path.isfile(p) and now - os.path.getmtime(p) > _FETCH_TTL_SEC:
+                os.remove(p)
+    except Exception:
+        pass
+
+
+def _find_fetched(fid):
+    if not fid or not _FID_RE.match(fid):
+        return None
+    for m in glob.glob(os.path.join(_FETCH_DIR, fid + '.*')):
+        if not m.endswith('.json'):
+            return m
+    return None
+
+
+@app.route('/api/fetch-url', methods=['POST'])
+def fetch_url():
+    req = request.get_json(silent=True) or {}
+    url = (req.get('url') or '').strip()
+    try:
+        pu = urllib.parse.urlparse(url)
+    except Exception:
+        pu = None
+    if not pu or pu.scheme not in ('http', 'https') or not pu.hostname:
+        return jsonify({"error": "URL မမှန်ပါ — https://... ပုံစံ link ဖြစ်ရပါမယ်"}), 400
+    host = pu.hostname.lower()
+    if not any(host == d or host.endswith('.' + d) for d in _ALLOWED_DL_HOSTS):
+        return jsonify({"error": "ဒီ website ကို support မပေးသေးပါ — YouTube / TikTok / Douyin / RedNote / Bilibili ပဲ ရပါတယ်"}), 400
+    try:
+        import yt_dlp
+    except ImportError:
+        return jsonify({"error": "server မှာ yt-dlp မရှိသေးပါ — deploy ပြီးမှ ပြန်စမ်းကြည့်ပါ"}), 500
+
+    _cleanup_fetch_dir()
+    fid = secrets.token_urlsafe(16)
+    ff = _ffmpeg_bin()
+    ydl_opts = {
+        'format': 'best[height<=720][ext=mp4]/best[height<=720]/best',
+        'outtmpl': os.path.join(_FETCH_DIR, fid + '.%(ext)s'),
+        'noplaylist': True,
+        'quiet': True, 'no_warnings': True,
+        'socket_timeout': 30, 'retries': 3,
+    }
+    if os.path.sep in ff:
+        ydl_opts['ffmpeg_location'] = os.path.dirname(ff)
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'socket_timeout': 20}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        dur = info.get('duration') or 0
+        if dur > _MAX_DL_DURATION_SEC:
+            return jsonify({"error": f"ဗီဒီယိုက ရှည်လွန်းပါတယ် ({int(dur // 60)} မိနစ်) — ၂ နာရီအထိပဲ ရပါတယ်"}), 400
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        msg = str(e).split('\n')[0][:300] or 'download error'
+        for m in glob.glob(os.path.join(_FETCH_DIR, fid + '.*')):
+            try:
+                os.remove(m)
+            except Exception:
+                pass
+        return jsonify({"error": f"Download မရပါ: {msg}"}), 502
+
+    path = _find_fetched(fid)
+    if not path:
+        return jsonify({"error": "Download မရပါ — ဖိုင်မတွေ့ပါ"}), 502
+    title = (info.get('title') or 'video').strip()[:80]
+    return jsonify({"fileId": fid,
+                    "filename": title + os.path.splitext(path)[1],
+                    "duration": dur})
+
+
+@app.route('/api/temp-video/<fid>')
+def temp_video(fid):
+    path = _find_fetched(fid)
+    if not path:
+        return jsonify({"error": "ဗီဒီယို သက်တမ်းကုန်သွားပါပြီ — link ကနေ ပြန် download လုပ်ပေးပါ"}), 404
+    ext = os.path.splitext(path)[1].lower()
+    mime = {'mp4': 'video/mp4', 'webm': 'video/webm',
+            'mkv': 'video/x-matroska', 'mov': 'video/quicktime'}.get(ext[1:], 'video/mp4')
+    return send_file(path, mimetype=mime, conditional=True)
 
 
 @app.route('/api/health')
@@ -357,6 +478,13 @@ HTML_PAGE = """<!DOCTYPE html>
       background: linear-gradient(135deg, #e11d48, #ec4899);
       color: white; font-size: 12px; font-weight: 600;
       padding: 9px 16px; border-radius: 12px; border: none; cursor: pointer;
+    }
+    .tab-btn {
+      background: rgba(255,255,255,0.06); color: #f9a8d4; font-size: 12px; font-weight: 600;
+      padding: 8px 14px; border-radius: 12px; border: 1px solid rgba(244,114,182,0.25); cursor: pointer;
+    }
+    .tab-btn.active {
+      background: linear-gradient(135deg, #e11d48, #ec4899); color: #fff; border-color: transparent;
     }
 
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(244, 114, 182, 0.15); }
@@ -563,8 +691,21 @@ HTML_PAGE = """<!DOCTYPE html>
             <div style="font-size: 11px; color: #f472b6;">Total: <b id="subCount" style="color: #fff;">0</b> items</div>
           </div>
         </div>
-        <input type="file" id="fileInput" accept=".srt,video/*,audio/*" style="display:none;"/>
-        <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <button class="tab-btn active" id="tabFile" onclick="setUploadMode('file')">\U0001F4C1 File</button>
+          <button class="tab-btn" id="tabLink" onclick="setUploadMode('link')">\U0001F517 Link</button>
+        </div>
+        <div id="fileModeBox">
+          <input type="file" id="fileInput" accept=".srt,video/*,audio/*" style="display:none;"/>
+          <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+        </div>
+        <div id="linkModeBox" style="display:none;">
+          <div style="display:flex;gap:8px;">
+            <input type="url" id="linkInput" placeholder="YouTube / TikTok / Bilibili link..." style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(244,114,182,0.25);color:#fff;border-radius:12px;padding:9px 12px;font-size:12px;outline:none;"/>
+            <button class="upload-btn" onclick="fetchVideoLink()">\u2b07\ufe0f Get</button>
+          </div>
+          <div style="font-size:11px;opacity:0.65;margin-top:6px;">YouTube \u00b7 TikTok \u00b7 Douyin \u00b7 RedNote \u00b7 Bilibili — \u1042 \u1014\u102c\u101b\u102e\u1001\u103b\u102d\u1014\u103a\u1021\u1011\u102d</div>
+        </div>
       </div>
 
       <div class="grid-2">
@@ -910,10 +1051,97 @@ HTML_PAGE = """<!DOCTYPE html>
       if (done >= total) progressTimer = setTimeout(() => { pContainer.style.display = 'none'; }, 3000);
     }
 
+    let currentFileId = null;
+
+function postTranscribe(body, isJson) {
+      return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/transcribe');
+            if (isJson) {
+              xhr.setRequestHeader('Content-Type', 'application/json');
+            } else {
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                const pct = Math.round(e.loaded / e.total * 100);
+                setStatus(`\u1016\u102d\u102f\u1004\u103a\u1010\u1004\u103a\u1014\u1031\u1010\u101a\u103a... ${pct}%`);
+              }
+            };
+            xhr.upload.onload = () => setStatus("ဖိုင်တင်ပြီးပြီ — server မှာ အသံထုတ်/Transcribe လုပ်နေတယ်...");
+            }
+            xhr.onload = () => {
+              let d;
+              try { d = JSON.parse(xhr.responseText); }
+              catch(e) { reject(new Error("Server Timeout \u1016\u103c\u1005\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a (HTTP " + xhr.status + ")")); return; }
+              if (xhr.status < 200 || xhr.status >= 300 || d.error) reject(new Error(d.error || "Transcription Failed"));
+              else resolve(d);
+            };
+            xhr.onerror = () => reject(new Error("\u1000\u103d\u1014\u103a\u1014\u1000\u103a\u101b\u103e\u1004\u103a \u1015\u103c\u1010\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a \u2014 လိုင်းစစ်ပြီး ပြန်တင်ကြည့်ပါ"));
+            xhr.send(body);
+          });
+    }
+
+    function setUploadMode(mode) {
+      const isFile = mode === 'file';
+      document.getElementById('fileModeBox').style.display = isFile ? '' : 'none';
+      document.getElementById('linkModeBox').style.display = isFile ? 'none' : '';
+      document.getElementById('tabFile').classList.toggle('active', isFile);
+      document.getElementById('tabLink').classList.toggle('active', !isFile);
+    }
+
+    async function fetchVideoLink() {
+      const url = document.getElementById('linkInput').value.trim();
+      if (!url) { alert('Link \u1011\u100a\u1037\u103a\u1037\u1015\u1031\u1038\u1015\u102b'); return; }
+      setStatus('\u1017\u102e\u1012\u102e\u101a\u102d\u102f download \u1006\u1032\u1032\u1014\u1031\u1015\u102b\u1010\u101a\u103a... \u1001\u100f\u1005\u1031\u102c\u1004\u1037\u103a\u1015\u1031\u1038\u1015\u102b');
+      try {
+        const res = await fetch('/api/fetch-url', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url})
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Download failed');
+        currentFileId = data.fileId;
+        uploadedFileName = (data.filename || 'video').replace(/\\.[^.]+$/, '') || 'video';
+        const video = document.getElementById('mainVideo');
+        if (currentVideoUrl) URL.revokeObjectURL(currentVideoUrl);
+        currentVideoUrl = null;
+        video.src = '/api/temp-video/' + data.fileId;
+        document.getElementById('videoContainer').style.display = 'block';
+        document.getElementById('followBar').style.display = 'flex';
+        setStatus('Download \u101b\u1015\u102b\u1010\u103a\u1015\u102b\u1010\u101a\u103a! Transcribe \u101c\u102f\u1015\u103a\u1014\u1031\u1015\u102c\u1010\u101a\u103a...');
+        transcribeLinkFile();
+      } catch(err) {
+        currentFileId = null;
+        alert('Error: ' + err.message);
+        setStatus('Download \u1019\u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b', 3000);
+      }
+    }
+
+    async function transcribeLinkFile() {
+      const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
+      if (!groqKey) {
+        alert("Audio/Video transcribe \u101c\u102f\u1015\u103a\u101b\u1014\u103a Groq API Key \u101c\u102d\u102f\u1021\u1015\u103a\u101e\u100a\u103a\u1015\u102b\u1010\u101a\u103a\u3002 Menu \u1011\u100a\u1037\u1000 Guide \u1000\u102d\u102f \u1016\u1010\u103a\u101b\u103e \u1021\u1001\u1019\u1032\u1037 \u101a\u1030\u1014\u102d\u102f\u1004\u103a\u1015\u102b\u101e\u100a\u103a\u1001\u1004\u103a\u1017\u103b\u102c\u3002");
+        openSettingsModal();
+        return;
+      }
+      if (subtitles.length > 0 && !confirm("Subtitle \u101b\u103e\u102d\u1015\u102e\u1038\u101e\u102c\u1038 \u1016\u103c\u1005\u103a\u101e\u100a\u103a\u1015\u102b\u1010\u101a\u103a\u3002\\n\\nOK = Whisper AI \u1016\u101f\u1004\u1037\u103a Subtitle \u1021\u101e\u1005\u103a\u1011\u102f\u1010\u103a\u1019\u100a\u103a (\u101b\u103e\u102d\u1015\u102e\u1038\u101e\u102c\u1038\u1000\u102d\u102f \u1021\u1005\u102c\u1038\u1011\u102d\u102f\u1038\u1019\u100a\u103a)\\nCancel = \u1019\u101c\u102f\u1015\u103a\u1015\u102b")) return;
+      setStatus('Whisper AI \u1016\u101f\u1004\u1037\u103a Subtitle \u1011\u102f\u1010\u103a\u101a\u1030\u1014\u1031\u1015\u102c\u1010\u101a\u103a...');
+      try {
+        const data = await postTranscribe(JSON.stringify({fileId: currentFileId, apiKey: groqKey}), true);
+        subtitles = data.subtitles;
+        renderList();
+        setStatus("Transcription \u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b\u1010\u101a\u103a!", 3000);
+      } catch(err) {
+        alert("Error: " + err.message);
+        setStatus("Transcription \u1019\u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b", 3000);
+      }
+    }
+
     async function handleFileSelected(e) {
       const file = e.target.files[0];
       e.target.value = '';
       if (!file) return;
+      currentFileId = null;
 
       uploadedFileName = file.name.substring(0, file.name.lastIndexOf('.')) || "subtitles";
       const ext = file.name.split('.').pop().toLowerCase();
@@ -953,26 +1181,7 @@ HTML_PAGE = """<!DOCTYPE html>
         try {
           // XHR instead of fetch: shows live upload % so we can tell whether a
           // big file is stuck uploading (weak line) or stuck processing (server).
-          const data = await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/transcribe');
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable) {
-                const pct = Math.round(e.loaded / e.total * 100);
-                setStatus(`\u1016\u102d\u102f\u1004\u103a\u1010\u1004\u103a\u1014\u1031\u1010\u101a\u103a... ${pct}%`);
-              }
-            };
-            xhr.upload.onload = () => setStatus("ဖိုင်တင်ပြီးပြီ — server မှာ အသံထုတ်/Transcribe လုပ်နေတယ်...");
-            xhr.onload = () => {
-              let d;
-              try { d = JSON.parse(xhr.responseText); }
-              catch(e) { reject(new Error("Server Timeout \u1016\u103c\u1005\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a (HTTP " + xhr.status + ")")); return; }
-              if (xhr.status < 200 || xhr.status >= 300 || d.error) reject(new Error(d.error || "Transcription Failed"));
-              else resolve(d);
-            };
-            xhr.onerror = () => reject(new Error("\u1000\u103d\u1014\u103a\u1014\u1000\u103a\u101b\u103e\u1004\u103a \u1015\u103c\u1010\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a \u2014 လိုင်းစစ်ပြီး ပြန်တင်ကြည့်ပါ"));
-            xhr.send(fd);
-          });
+          const data = await postTranscribe(fd, false);
           subtitles = data.subtitles;
           renderList();
           setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
