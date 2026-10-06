@@ -962,7 +962,7 @@ HTML_PAGE = """<!DOCTYPE html>
                 setStatus(`\u1016\u102d\u102f\u1004\u103a\u1010\u1004\u103a\u1014\u1031\u1010\u101a\u103a... ${pct}%`);
               }
             };
-            xhr.upload.onload = () => setStatus("\u1016\u102d\u102f\u1004\u103a\u1010\u1004\u103a\u1015\u103c\u102e\u1038\u1015\u102b\u101e\u100a\u103a \u2014 server \u1019\u103e\u102c \u1021\u101e\u1036\u1011\u102f\u1010\u103a\u101c\u1030\u103a/Transcribe \u101c\u102f\u1015\u103a\u1014\u1031\u1010\u101a\u103a...");
+            xhr.upload.onload = () => setStatus("ဖိုင်တင်ပြီးပြီ — server မှာ အသံထုတ်/Transcribe လုပ်နေတယ်...");
             xhr.onload = () => {
               let d;
               try { d = JSON.parse(xhr.responseText); }
@@ -970,15 +970,15 @@ HTML_PAGE = """<!DOCTYPE html>
               if (xhr.status < 200 || xhr.status >= 300 || d.error) reject(new Error(d.error || "Transcription Failed"));
               else resolve(d);
             };
-            xhr.onerror = () => reject(new Error("\u1000\u103d\u1014\u103a\u1014\u1000\u103a\u101b\u103e\u1004\u103a \u1015\u103c\u1010\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a \u2014 \u101c\u102d\u102f\u1004\u103a\u1038\u1005\u1005\u103a\u1015\u102b\u1038 \u1015\u103c\u1014\u103a\u1010\u1004\u103a\u1000\u103c\u100a\u1037\u103a\u1015\u102b"));
+            xhr.onerror = () => reject(new Error("\u1000\u103d\u1014\u103a\u1014\u1000\u103a\u101b\u103e\u1004\u103a \u1015\u103c\u1010\u103a\u101e\u103d\u102c\u1038\u1015\u102b\u101e\u100a\u103a \u2014 လိုင်းစစ်ပြီး ပြန်တင်ကြည့်ပါ"));
             xhr.send(fd);
           });
           subtitles = data.subtitles;
           renderList();
-          setStatus("Transcription \u1021\u1031\u1021\u1004\u103a\u1019\u103e\u1004\u103a\u1015\u102b\u101e\u100a\u103a!", 3000);
+          setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
         } catch(err) {
           alert("Error: " + err.message);
-          setStatus("Transcription \u1019\u1000\u1031\u1021\u1004\u103a\u1019\u103e\u1004\u103a\u1015\u102b", 3000);
+          setStatus("Transcription မအောင်မြင်ပါ", 3000);
         }
       }
     }
