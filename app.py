@@ -267,17 +267,21 @@ def fetch_url():
     _cleanup_fetch_dir()
     fid = secrets.token_urlsafe(16)
     ff = _ffmpeg_bin()
-    ydl_opts = {
+    # YouTube blocks datacenter IPs with 'Sign in to confirm you are not a bot'
+    # on its web client; the app-based player clients often still work.
+    _base_ydl = {'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
+                 'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv']}}}
+    ydl_opts = dict(_base_ydl)
+    ydl_opts.update({
         'format': 'best[height<=720][ext=mp4]/best[height<=720]/best',
         'outtmpl': os.path.join(_FETCH_DIR, fid + '.%(ext)s'),
         'noplaylist': True,
-        'quiet': True, 'no_warnings': True,
         'socket_timeout': 30, 'retries': 3,
-    }
+    })
     if os.path.sep in ff:
         ydl_opts['ffmpeg_location'] = os.path.dirname(ff)
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'socket_timeout': 20}) as ydl:
+        with yt_dlp.YoutubeDL(_base_ydl) as ydl:
             info = ydl.extract_info(url, download=False)
         dur = info.get('duration') or 0
         if dur > _MAX_DL_DURATION_SEC:
@@ -286,6 +290,9 @@ def fetch_url():
             ydl.download([url])
     except Exception as e:
         msg = str(e).split('\n')[0][:300] or 'download error'
+        low = msg.lower()
+        if 'not a bot' in low or 'sign in to confirm' in low:
+            return jsonify({"error": "YouTube \u1000 \u1005\u1010\u102b\u1017\u102c\u1000\u102d\u102f bot \u101c\u102d\u102f\u1037\u101e\u1010\u103a\u1019\u103e\u1010\u103a\u1015\u102e\u1038 \u1010\u102c\u1038\u1011\u102c\u1038\u1015\u102b\u1010\u101a\u103a — TikTok / Bilibili link \u1014\u100a\u1037\u103a\u1037 \u1005\u1019\u103a\u1038\u1000\u103c\u100a\u1037\u103a\u1015\u102b, \u1012\u102b\u1019\u103e\u1010\u103a\u1019\u103e\u1010\u103a \u1016\u102f\u1014\u103a\u1038\u1014\u100a\u1037\u103a download \u101c\u102f\u1015\u103a\u1015\u102e\u1038 file \u1021\u1014\u1031\u1014\u100a\u1037\u103a \u1010\u1004\u103a\u1015\u102b"}), 502
         for m in glob.glob(os.path.join(_FETCH_DIR, fid + '.*')):
             try:
                 os.remove(m)
@@ -701,8 +708,8 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <div id="linkModeBox" style="display:none;">
           <div style="display:flex;gap:8px;">
-            <input type="url" id="linkInput" placeholder="YouTube / TikTok / Bilibili link..." style="flex:1;background:rgba(255,255,255,0.06);border:1px solid rgba(244,114,182,0.25);color:#fff;border-radius:12px;padding:9px 12px;font-size:12px;outline:none;"/>
-            <button class="upload-btn" onclick="fetchVideoLink()">\u2b07\ufe0f Get</button>
+            <input type="url" id="linkInput" placeholder="YouTube / TikTok / Bilibili link..." style="flex:1;min-width:0;background:rgba(255,255,255,0.06);border:1px solid rgba(244,114,182,0.25);color:#fff;border-radius:12px;padding:9px 12px;font-size:12px;outline:none;"/>
+            <button class="upload-btn" style="flex-shrink:0;white-space:nowrap;" onclick="fetchVideoLink()">\u2b07\ufe0f Get</button>
           </div>
           <div style="font-size:11px;opacity:0.65;margin-top:6px;">YouTube \u00b7 TikTok \u00b7 Douyin \u00b7 RedNote \u00b7 Bilibili — \u1042 \u1014\u102c\u101b\u102e\u1001\u103b\u102d\u1014\u103a\u1021\u1011\u102d</div>
         </div>
