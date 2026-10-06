@@ -269,7 +269,10 @@ def fetch_url():
     ff = _ffmpeg_bin()
     # YouTube blocks datacenter IPs with 'Sign in to confirm you are not a bot'
     # on its web client; the app-based player clients often still work.
+    # impersonate: TikTok's extractor needs browser impersonation (curl_cffi),
+    # otherwise it fails with 'Unexpected response from webpage request'.
     _base_ydl = {'quiet': True, 'no_warnings': True, 'socket_timeout': 20,
+                 'impersonate': 'chrome',
                  'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'tv']}}}
     ydl_opts = dict(_base_ydl)
     ydl_opts.update({
@@ -292,7 +295,9 @@ def fetch_url():
         msg = str(e).split('\n')[0][:300] or 'download error'
         low = msg.lower()
         if 'not a bot' in low or 'sign in to confirm' in low:
-            return jsonify({"error": "YouTube \u1000 \u1005\u1010\u102b\u1017\u102c\u1000\u102d\u102f bot \u101c\u102d\u102f\u1037\u101e\u1010\u103a\u1019\u103e\u1010\u103a\u1015\u102e\u1038 \u1010\u102c\u1038\u1011\u102c\u1038\u1015\u102b\u1010\u101a\u103a — TikTok / Bilibili link \u1014\u100a\u1037\u103a\u1037 \u1005\u1019\u103a\u1038\u1000\u103c\u100a\u1037\u103a\u1015\u102b, \u1012\u102b\u1019\u103e\u1010\u103a\u1019\u103e\u1010\u103a \u1016\u102f\u1014\u103a\u1038\u1014\u100a\u1037\u103a download \u101c\u102f\u1015\u103a\u1015\u102e\u1038 file \u1021\u1014\u1031\u1014\u100a\u1037\u103a \u1010\u1004\u103a\u1015\u102b"}), 502
+            return jsonify({"error": "YouTube က server ကို bot လို့သတ်မှတ်ပြီး တားထားပါတယ် — TikTok / Bilibili link နဲ့ စမ်းကြည့်ပါ၊ ဒါမှမဟုတ် ဖုန်းနဲ့ download လုပ်ပြီး file အနေနဲ့ တင်ပါ"}), 502
+        if 'tiktok' in low and 'unexpected response from webpage' in low:
+            return jsonify({"error": "TikTok က link ကို ဖတ်မရပါ (သူတို့ဘက်က တားထားလို့ပါ) — ခဏနေပြန်စမ်းကြည့်ပါ၊ ဒါမှမဟုတ် ဖုန်းနဲ့ download လုပ်ပြီး file အနေနဲ့ တင်ပါ"}), 502
         for m in glob.glob(os.path.join(_FETCH_DIR, fid + '.*')):
             try:
                 os.remove(m)
@@ -698,20 +703,18 @@ HTML_PAGE = """<!DOCTYPE html>
             <div style="font-size: 11px; color: #f472b6;">Total: <b id="subCount" style="color: #fff;">0</b> items</div>
           </div>
         </div>
-        <div style="display:flex;gap:8px;margin-bottom:8px;">
-          <button class="tab-btn active" id="tabFile" onclick="setUploadMode('file')">\U0001F4C1 File</button>
-          <button class="tab-btn" id="tabLink" onclick="setUploadMode('link')">\U0001F517 Link</button>
+        <div style="display:flex;gap:8px;margin:10px 0;">
+          <button class="tab-btn active" id="tabFile" style="flex:1;padding:11px;" onclick="setUploadMode('file')">📁 File</button>
+          <button class="tab-btn" id="tabLink" style="flex:1;padding:11px;" onclick="setUploadMode('link')">🔗 Link</button>
         </div>
         <div id="fileModeBox">
           <input type="file" id="fileInput" accept=".srt,video/*,audio/*" style="display:none;"/>
           <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
         </div>
         <div id="linkModeBox" style="display:none;">
-          <div style="display:flex;gap:8px;">
-            <input type="url" id="linkInput" placeholder="YouTube / TikTok / Bilibili link..." style="flex:1;min-width:0;background:rgba(255,255,255,0.06);border:1px solid rgba(244,114,182,0.25);color:#fff;border-radius:12px;padding:9px 12px;font-size:12px;outline:none;"/>
-            <button class="upload-btn" style="flex-shrink:0;white-space:nowrap;" onclick="fetchVideoLink()">\u2b07\ufe0f Get</button>
-          </div>
-          <div style="font-size:11px;opacity:0.65;margin-top:6px;">YouTube \u00b7 TikTok \u00b7 Douyin \u00b7 RedNote \u00b7 Bilibili — \u1042 \u1014\u102c\u101b\u102e\u1001\u103b\u102d\u1014\u103a\u1021\u1011\u102d</div>
+          <input type="url" id="linkInput" placeholder="Video link paste လုပ်ပါ..." style="width:100%;box-sizing:border-box;background:rgba(255,255,255,0.06);border:1px solid rgba(244,114,182,0.25);color:#fff;border-radius:12px;padding:11px 12px;font-size:13px;outline:none;"/>
+          <button class="upload-btn" style="width:100%;margin-top:8px;padding:11px;" onclick="fetchVideoLink()">⬇️ Get Video</button>
+          <div style="font-size:11px;opacity:0.65;margin-top:6px;">YouTube · TikTok · Douyin · RedNote · Bilibili — ၂ နာရီအထိ</div>
         </div>
       </div>
 
@@ -1097,8 +1100,8 @@ function postTranscribe(body, isJson) {
 
     async function fetchVideoLink() {
       const url = document.getElementById('linkInput').value.trim();
-      if (!url) { alert('Link \u1011\u100a\u1037\u103a\u1037\u1015\u1031\u1038\u1015\u102b'); return; }
-      setStatus('\u1017\u102e\u1012\u102e\u101a\u102d\u102f download \u1006\u1032\u1032\u1014\u1031\u1015\u102b\u1010\u101a\u103a... \u1001\u100f\u1005\u1031\u102c\u1004\u1037\u103a\u1015\u1031\u1038\u1015\u102b');
+      if (!url) { alert('Link ထည့်ပေးပါ'); return; }
+      setStatus('ဗီဒီယို download လုပ်နေပါသည်... ခဏစောင့်ပေးပါ');
       try {
         const res = await fetch('/api/fetch-url', {
           method: 'POST',
@@ -1115,32 +1118,32 @@ function postTranscribe(body, isJson) {
         video.src = '/api/temp-video/' + data.fileId;
         document.getElementById('videoContainer').style.display = 'block';
         document.getElementById('followBar').style.display = 'flex';
-        setStatus('Download \u101b\u1015\u102b\u1010\u103a\u1015\u102b\u1010\u101a\u103a! Transcribe \u101c\u102f\u1015\u103a\u1014\u1031\u1015\u102c\u1010\u101a\u103a...');
+        setStatus('Download ရပါပြီ! Transcribe လုပ်နေပါသည်...');
         transcribeLinkFile();
       } catch(err) {
         currentFileId = null;
         alert('Error: ' + err.message);
-        setStatus('Download \u1019\u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b', 3000);
+        setStatus('Download မအောင်မြင်ပါ', 3000);
       }
     }
 
     async function transcribeLinkFile() {
       const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
       if (!groqKey) {
-        alert("Audio/Video transcribe \u101c\u102f\u1015\u103a\u101b\u1014\u103a Groq API Key \u101c\u102d\u102f\u1021\u1015\u103a\u101e\u100a\u103a\u1015\u102b\u1010\u101a\u103a\u3002 Menu \u1011\u100a\u1037\u1000 Guide \u1000\u102d\u102f \u1016\u1010\u103a\u101b\u103e \u1021\u1001\u1019\u1032\u1037 \u101a\u1030\u1014\u102d\u102f\u1004\u103a\u1015\u102b\u101e\u100a\u103a\u1001\u1004\u103a\u1017\u103b\u102c\u3002");
+        alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။ Menu ထဲက Guide ကို ဖတ်၍ အခမဲ့ ယူနိုင်ပါသည်ခင်ဗျာ။");
         openSettingsModal();
         return;
       }
-      if (subtitles.length > 0 && !confirm("Subtitle \u101b\u103e\u102d\u1015\u102e\u1038\u101e\u102c\u1038 \u1016\u103c\u1005\u103a\u101e\u100a\u103a\u1015\u102b\u1010\u101a\u103a\u3002\\n\\nOK = Whisper AI \u1016\u101f\u1004\u1037\u103a Subtitle \u1021\u101e\u1005\u103a\u1011\u102f\u1010\u103a\u1019\u100a\u103a (\u101b\u103e\u102d\u1015\u102e\u1038\u101e\u102c\u1038\u1000\u102d\u102f \u1021\u1005\u102c\u1038\u1011\u102d\u102f\u1038\u1019\u100a\u103a)\\nCancel = \u1019\u101c\u102f\u1015\u103a\u1015\u102b")) return;
-      setStatus('Whisper AI \u1016\u101f\u1004\u1037\u103a Subtitle \u1011\u102f\u1010\u103a\u101a\u1030\u1014\u1031\u1015\u102c\u1010\u101a\u103a...');
+      if (subtitles.length > 0 && !confirm("Subtitle ရှိပြီးသား ဖြစ်ပါသည်။\\n\\nOK = Whisper AI ဖြင့် Subtitle အသစ်ထုတ်မည် (ရှိပြီးသားကို အစားထိုးမည်)\\nCancel = မလုပ်ပါ")) return;
+      setStatus('Whisper AI ဖြင့် Subtitle ထုတ်နေပါတယ်...');
       try {
         const data = await postTranscribe(JSON.stringify({fileId: currentFileId, apiKey: groqKey}), true);
         subtitles = data.subtitles;
         renderList();
-        setStatus("Transcription \u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b\u1010\u101a\u103a!", 3000);
+        setStatus("Transcription အောင်မြင်ပါသည်!", 3000);
       } catch(err) {
         alert("Error: " + err.message);
-        setStatus("Transcription \u1019\u1021\u1031\u102c\u1004\u103a\u1019\u103c\u1004\u103a\u1015\u102b", 3000);
+        setStatus("Transcription မအောင်မြင်ပါ", 3000);
       }
     }
 
