@@ -222,6 +222,27 @@ def translate():
     }
     chosen_tone = tone_descriptions.get(tone_style, tone_descriptions['natural'])
 
+    # လူ့လက်ရာနဲ့တူအောင်: AI ပြန်မှန်းသိသာစေတဲ့ အချက်တွေ ဖြေရှင်း (Burmese target အတွက်သာ)
+    _HUMAN_STYLE = (
+        " Write like a veteran human subtitler, NOT a translation machine. "
+        "Translate MEANING \u2014 never mirror the source sentence structure; rebuild each line "
+        "the way a Burmese person would actually say it. One idea per subtitle line; cut "
+        "filler the viewer can already see on screen. "
+        "Match the register to each speaker's relationship and keep it consistent across the "
+        "whole video: close friends / lovers / family \u2192 casual (ငါ/နင်); strangers, elders, "
+        "bosses \u2192 polite (ကျွန်တော်/ခင်ဗျား). "
+        "Localize idioms, jokes and slang into natural Burmese equivalents \u2014 never translate "
+        "them literally. No em-dashes, no explanatory padding. "
+        "FINAL CHECK: read each line aloud in your head \u2014 if no real Burmese speaker would say "
+        "it like that, rewrite it until it sounds human."
+    )
+    # စကားပြောဟန် tone တွေအတွက် ထပ်တိုး: စာအုပ်ဆန် connectors တားမြစ်
+    _HUMAN_STYLE_SPOKEN = (
+        " BANNED stiff written-style connectors: ထို့ကြောင့်, သို့သော်လည်း, ထို့နောက်, "
+        "ထို့အပြင် \u2014 use conversational ones instead "
+        "(ဒါကြောင့်, ဒါပေမဲ့, ပြီးတော့)."
+    )
+
     system_prompt = (
         f"You are a professional audiovisual subtitle translator. "
         f"Translate the following subtitles into {target_lang}. "
@@ -237,6 +258,11 @@ def translate():
             " Glossary (source term = required translation): whenever a source term below appears, "
             "translate it exactly as given and keep it consistent across all subtitles.\n" + glossary
         )
+    # လူ့လက်ရာနဲ့တူအောင် style rules — Burmese target အတွက်သာ (formal tone မာတော့ connector ban မထည့်)
+    if target_lang.strip().lower() in ('burmese', 'myanmar', 'မြန်မာ'):
+        system_prompt += _HUMAN_STYLE
+        if tone_style in ('natural', 'casual'):
+            system_prompt += _HUMAN_STYLE_SPOKEN
 
     payload_data = [{"id": s["id"], "text": s["originalText"]} for s in subtitles]
 
