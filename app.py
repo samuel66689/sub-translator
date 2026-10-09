@@ -363,6 +363,17 @@ def diag():
         "node": shutil.which('node'),
         "bin_on_path": _here_bin in os.environ.get('PATH', ''),
     }
+    dp = _ensure_deno()
+    if dp:
+        try:
+            p = subprocess.run([dp, '--version'], capture_output=True,
+                               text=True, timeout=30)
+            out['deno_runs'] = (p.returncode == 0)
+            out['deno_version'] = ((p.stdout or '')[:80] +
+                                   (p.stderr or '')[:80])
+        except Exception as e:
+            out['deno_runs'] = False
+            out['deno_version'] = 'exec error: ' + repr(e)[:200]
     try:
         p = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'],
                            capture_output=True, text=True, timeout=30)
