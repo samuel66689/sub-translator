@@ -576,9 +576,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     .upload-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .link-row { display: flex; gap: 8px; margin-top: 10px; }
-    .link-row input[type="text"] { flex: 1; min-width: 0; }
-    .link-row .upload-btn { white-space: nowrap; }
+
     .upload-info { display: flex; align-items: center; gap: 12px; }
     .upload-icon {
       width: 42px; height: 42px; min-width: 42px; max-width: 42px;
@@ -800,10 +798,7 @@ HTML_PAGE = """<!DOCTYPE html>
         <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
       </div>
 
-      <div class="link-row">
-        <input type="text" id="ytLink" placeholder="YouTube link paste ချပါ — https://youtu.be/..." autocomplete="off"/>
-        <button class="upload-btn" onclick="fetchYouTubeLink()">⬇ Link နဲ့ယူ</button>
-      </div>
+
 
       <div class="grid-2">
         <div>
@@ -1218,42 +1213,6 @@ HTML_PAGE = """<!DOCTYPE html>
           alert("Error: " + err.message);
           setStatus("Transcription မအောင်မြင်ပါ", 3000);
         }
-      }
-    }
-
-    async function fetchYouTubeLink() {
-      const url = document.getElementById('ytLink').value.trim();
-      if (!url) { alert("YouTube link ထည့်ပါ"); return; }
-      const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
-      if (!groqKey) {
-        alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။");
-        openSettingsModal();
-        return;
-      }
-      setStatus("YouTube ကနေ download ဆွဲနေပါတယ်... (video အရွယ်အစားပေါ် မူတည်ပြီး မိနစ်အနည်းငယ် ကြာနိုင်ပါတယ်)");
-      try {
-        const res = await fetch('/api/fetch-link', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({url, apiKey: groqKey})
-        });
-        let d;
-        try { d = await res.json(); }
-        catch(e) { throw new Error("Server error (HTTP " + res.status + ")"); }
-        if (!res.ok || d.error) throw new Error(d.error || "Download failed");
-        uploadedFileName = (d.title || "youtube_video").substring(0, 60);
-        if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
-        const video = document.getElementById('mainVideo');
-        video.src = '/api/link-video/' + d.videoToken;
-        document.getElementById('videoContainer').style.display = 'block';
-        document.getElementById('followBar').style.display = 'flex';
-        subtitles = d.subtitles;
-        renderList();
-        document.getElementById('ytLink').value = '';
-        setStatus("Download + Transcription အောင်မြင်ပါသည်! 🎉", 4000);
-      } catch(err) {
-        alert("Error: " + err.message);
-        setStatus("Download မအောင်မြင်ပါ", 3000);
       }
     }
 
