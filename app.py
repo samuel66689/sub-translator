@@ -251,7 +251,9 @@ def fetch_link():
     try:
         # sys.executable -m yt_dlp: works regardless of PATH/console-script
         # install location (pip user installs, venvs, Render, ...).
+        # --force-ipv4: some datacenter IPv6 ranges are harder-blocked by YouTube.
         yt_base = [sys.executable, '-m', 'yt_dlp', '--no-playlist',
+                   '--force-ipv4',
                    '--extractor-args', 'youtube:player_client=android']
 
         # 1) quick metadata probe — validates the link before downloading
@@ -297,6 +299,24 @@ def fetch_link():
         return jsonify({"error": str(e)}), 500
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.route('/api/diag')
+def diag():
+    """Environment diagnostics: is deno (yt-dlp JS runtime) on PATH?
+    Lets us verify the Render build installed what fetch-link needs."""
+    import shutil
+    out = {
+        "deno": shutil.which('deno'),
+        "bin_on_path": _here_bin in os.environ.get('PATH', ''),
+    }
+    try:
+        p = subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'],
+                           capture_output=True, text=True, timeout=30)
+        out['ytdlp'] = (p.stdout or '').strip() or (p.stderr or '')[-200:]
+    except Exception as e:
+        out['ytdlp'] = 'error: ' + str(e)
+    return jsonify(out)
 
 
 @app.route('/api/link-video/<token>')
