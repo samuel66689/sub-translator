@@ -21,14 +21,13 @@ else
 fi
 
 # deno: the ONLY JS runtime that solves YouTube's PO-token challenge for the
-# android player client (node does NOT work — verified). Installed with the
-# python stdlib only, so no wget/unzip dependency. The trailing version check
-# fails the build LOUDLY if deno is missing (set -e), instead of breaking
-# /api/fetch-link silently at runtime.
+# android player client (node does NOT work — verified 2026-10-09). Best-effort
+# install here; the app also self-heals a missing deno at runtime via
+# _ensure_deno() (the Render runtime network can download it), so a failed
+# build-time install must NOT fail the deploy.
 if [ ! -x "bin/deno" ]; then
     python3 -c "
 import urllib.request, zipfile, os
-# GitHub releases host (not dl.deno.land — may be blocked on some networks)
 url = 'https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip'
 os.makedirs('bin', exist_ok=True)
 print('downloading deno...', flush=True)
@@ -39,8 +38,7 @@ with zipfile.ZipFile('/tmp/deno.zip') as z:
 os.chmod('bin/deno', 0o755)
 os.remove('/tmp/deno.zip')
 print('deno bytes:', os.path.getsize('bin/deno'), flush=True)
-"
+" || echo "WARNING: deno build-time install failed — app will self-heal at runtime"
 fi
-bin/deno --version
 
 pip install -r requirements.txt
