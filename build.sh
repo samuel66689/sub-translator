@@ -28,7 +28,8 @@ fi
 if [ ! -x "bin/deno" ]; then
     python3 -c "
 import urllib.request, zipfile, os
-url = 'https://dl.deno.land/release/v2.9.7/deno-x86_64-unknown-linux-gnu.zip'
+# GitHub releases host (not dl.deno.land — may be blocked on some networks)
+url = 'https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip'
 os.makedirs('bin', exist_ok=True)
 print('downloading deno...', flush=True)
 urllib.request.urlretrieve(url, '/tmp/deno.zip')
