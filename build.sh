@@ -20,16 +20,26 @@ else
     rm -rf ffmpeg-release-amd64-static.tar.xz ffmpeg-*-amd64-static
 fi
 
-# deno: JS runtime that yt-dlp needs to solve YouTube's signature challenge
-# when using the android player client (bypasses datacenter bot-checks).
+# deno: the ONLY JS runtime that solves YouTube's PO-token challenge for the
+# android player client (node does NOT work — verified). Installed with the
+# python stdlib only, so no wget/unzip dependency. The trailing version check
+# fails the build LOUDLY if deno is missing (set -e), instead of breaking
+# /api/fetch-link silently at runtime.
 if [ ! -x "bin/deno" ]; then
-    DENO_VERSION="v2.9.7"
-    wget -q "https://dl.deno.land/release/${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" -O /tmp/deno.zip
-    unzip -o -q /tmp/deno.zip -d bin/
-    chmod +x bin/deno
-    rm -f /tmp/deno.zip
-else
-    echo "deno already present in ./bin, skipping download"
+    python3 -c "
+import urllib.request, zipfile, os
+url = 'https://dl.deno.land/release/v2.9.7/deno-x86_64-unknown-linux-gnu.zip'
+os.makedirs('bin', exist_ok=True)
+print('downloading deno...', flush=True)
+urllib.request.urlretrieve(url, '/tmp/deno.zip')
+print('extracting deno...', flush=True)
+with zipfile.ZipFile('/tmp/deno.zip') as z:
+    z.extractall('bin')
+os.chmod('bin/deno', 0o755)
+os.remove('/tmp/deno.zip')
+print('deno bytes:', os.path.getsize('bin/deno'), flush=True)
+"
 fi
+bin/deno --version
 
 pip install -r requirements.txt
