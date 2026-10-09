@@ -22,8 +22,10 @@ DEFAULT_MODEL = 'gemini-3.5-flash-lite'
 # Reuse connections (TCP/TLS keep-alive) across requests
 http = requests.Session()
 
-# yt-dlp needs a JS runtime (deno) on PATH to solve YouTube's signature
-# challenge from datacenter IPs. build.sh installs it into ./bin on Render.
+# yt-dlp needs the deno JS runtime on PATH to solve YouTube's PO-token
+# challenge from datacenter IPs (node does NOT work — verified 2026-10-09).
+# build.sh installs deno into ./bin. ./bin is also kept on PATH for the
+# static-ffmpeg fallback that build.sh may install there.
 _here_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
 if os.path.isdir(_here_bin):
     os.environ['PATH'] = _here_bin + os.pathsep + os.environ.get('PATH', '')
@@ -252,8 +254,11 @@ def fetch_link():
         # sys.executable -m yt_dlp: works regardless of PATH/console-script
         # install location (pip user installs, venvs, Render, ...).
         # --force-ipv4: some datacenter IPv6 ranges are harder-blocked by YouTube.
+        # --js-runtimes deno: explicit — only deno solves the PO-token
+        # challenge (node verified NOT working, 2026-10-09).
         yt_base = [sys.executable, '-m', 'yt_dlp', '--no-playlist',
                    '--force-ipv4',
+                   '--js-runtimes', 'deno',
                    '--extractor-args', 'youtube:player_client=android']
 
         # 1) quick metadata probe — validates the link before downloading
@@ -308,6 +313,7 @@ def diag():
     import shutil
     out = {
         "deno": shutil.which('deno'),
+        "node": shutil.which('node'),
         "bin_on_path": _here_bin in os.environ.get('PATH', ''),
     }
     try:
