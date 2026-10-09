@@ -1,11 +1,14 @@
 import re
 import os
+import sys
 import json
 import shutil
+import secrets
 import tempfile
 import subprocess
+import time
 import requests
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 
 app = Flask(__name__)
 # 2GB upload limit — big files are streamed to disk, then ffmpeg extracts a
@@ -18,6 +21,32 @@ DEFAULT_MODEL = 'gemini-3.5-flash-lite'
 
 # Reuse connections (TCP/TLS keep-alive) across requests
 http = requests.Session()
+
+# yt-dlp needs a JS runtime (deno) on PATH to solve YouTube's signature
+# challenge from datacenter IPs. build.sh installs it into ./bin on Render.
+_here_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin')
+if os.path.isdir(_here_bin):
+    os.environ['PATH'] = _here_bin + os.pathsep + os.environ.get('PATH', '')
+
+# Cache dir for videos fetched via /api/fetch-link, served to the in-app
+# player through /api/link-video/<token>. Tokens expire after 3h.
+_LINK_CACHE_DIR = os.path.join(tempfile.gettempdir(), 'st_link_videos')
+_LINK_CACHE = {}  # token -> expires_at (epoch)
+
+_YT_URL_RE = re.compile(
+    r'^(https?://)?(www\.|m\.)?(youtube\.com/(watch|shorts|embed)|youtu\.be/)',
+    re.IGNORECASE)
+
+
+def _sweep_link_cache():
+    now = time.time()
+    for tok, exp in list(_LINK_CACHE.items()):
+        if exp < now:
+            _LINK_CACHE.pop(tok, None)
+            try:
+                os.remove(os.path.join(_LINK_CACHE_DIR, tok + '.mp4'))
+            except OSError:
+                pass
 
 _FENCE_START = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
 _FENCE_END = re.compile(r"\s*```$")
@@ -134,6 +163,50 @@ def _transcribe_chunked(audio_path, api_key):
     return all_segs
 
 
+def _transcribe_media_file(in_path, filename, api_key, workdir):
+    """Transcribe an already-saved media file at in_path.
+
+    Returns (items, None) on success, (None, (msg, http_code)) on failure.
+    NOTE: for files > _DIRECT_MAX_BYTES the original in_path is replaced by
+    an extracted mp3 (callers needing the original must copy it first).
+    """
+    audio_path = in_path
+    audio_name = filename or 'audio'
+    if os.path.getsize(in_path) > _DIRECT_MAX_BYTES:
+        # Big file (long video): extract a small mono mp3 with ffmpeg —
+        # same trick as audio-dub-studio — so Groq's 25MB limit is never hit.
+        audio_path = os.path.join(workdir, 'audio.mp3')
+        audio_name = 'audio.mp3'
+        p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error', '-i', in_path,
+                            '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
+                            audio_path],
+                           capture_output=True, text=True, timeout=1800)
+        os.remove(in_path)
+        if p.returncode != 0 or not os.path.isfile(audio_path):
+            return None, ("ffmpeg နဲ့ အသံထုတ်မရပါ — ဖိုင်မှာ အသံလမ်းကြောင်း (audio track) မရှိတာဖြစ်နိုင်ပါတယ်", 400)
+
+    if os.path.getsize(audio_path) <= _GROQ_MAX_BYTES:
+        segments, err = _groq_transcribe_file(audio_path, audio_name, api_key)
+        if err:
+            return None, err
+    else:
+        # Still too big (roughly >43 min): transcribe in chunks and stitch.
+        segments = _transcribe_chunked(audio_path, api_key)
+
+    items = [
+        {
+            "id": idx,
+            "startTime": fmt_srt_time(float(seg.get('start') or 0)),
+            "endTime": fmt_srt_time(float(seg.get('end') or 0)),
+            "originalText": (seg.get('text') or '').strip(),
+            "translatedText": ""
+        }
+        for idx, seg in enumerate(segments, 1)
+        if isinstance(seg, dict)
+    ]
+    return items, None
+
+
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe():
     file = request.files.get('file')
@@ -147,40 +220,9 @@ def transcribe():
         in_path = os.path.join(tmpdir, 'upload' + ext)
         file.save(in_path)  # streamed to disk — big files never sit in RAM
 
-        audio_path = in_path
-        audio_name = file.filename or 'audio'
-        if os.path.getsize(in_path) > _DIRECT_MAX_BYTES:
-            # Big file (long video): extract a small mono mp3 with ffmpeg —
-            # same trick as audio-dub-studio — so Groq's 25MB limit is never hit.
-            audio_path = os.path.join(tmpdir, 'audio.mp3')
-            audio_name = 'audio.mp3'
-            p = subprocess.run([_ffmpeg_bin(), '-y', '-v', 'error', '-i', in_path,
-                                '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k',
-                                audio_path],
-                               capture_output=True, text=True, timeout=1800)
-            os.remove(in_path)
-            if p.returncode != 0 or not os.path.isfile(audio_path):
-                return jsonify({"error": "ffmpeg နဲ့ အသံထုတ်မရပါ — ဖိုင်မှာ အသံလမ်းကြောင်း (audio track) မရှိတာဖြစ်နိုင်ပါတယ်"}), 400
-
-        if os.path.getsize(audio_path) <= _GROQ_MAX_BYTES:
-            segments, err = _groq_transcribe_file(audio_path, audio_name, api_key)
-            if err:
-                return jsonify({"error": err[0]}), err[1]
-        else:
-            # Still too big (roughly >43 min): transcribe in chunks and stitch.
-            segments = _transcribe_chunked(audio_path, api_key)
-
-        items = [
-            {
-                "id": idx,
-                "startTime": fmt_srt_time(float(seg.get('start') or 0)),
-                "endTime": fmt_srt_time(float(seg.get('end') or 0)),
-                "originalText": (seg.get('text') or '').strip(),
-                "translatedText": ""
-            }
-            for idx, seg in enumerate(segments, 1)
-            if isinstance(seg, dict)
-        ]
+        items, err = _transcribe_media_file(in_path, file.filename, api_key, tmpdir)
+        if err:
+            return jsonify({"error": err[0]}), err[1]
         return jsonify({"subtitles": items})
     except requests.exceptions.Timeout:
         return jsonify({"error": "Audio transcription timed out"}), 504
@@ -190,6 +232,84 @@ def transcribe():
         return jsonify({"error": str(e)}), 500
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.route('/api/fetch-link', methods=['POST'])
+def fetch_link():
+    """Download a YouTube video server-side (yt-dlp, android player client —
+    bypasses YouTube's datacenter bot-check), transcribe it, and keep the
+    video servable for the in-app player via /api/link-video/<token>."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get('url') or '').strip()
+    api_key = (data.get('apiKey') or '').strip()
+    if not api_key:
+        return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
+    if not url or not _YT_URL_RE.match(url):
+        return jsonify({"error": "YouTube link အမှန်ထည့်ပါ (youtube.com / youtu.be)"}), 400
+
+    tmpdir = tempfile.mkdtemp(prefix='stlink_')
+    try:
+        # sys.executable -m yt_dlp: works regardless of PATH/console-script
+        # install location (pip user installs, venvs, Render, ...).
+        yt_base = [sys.executable, '-m', 'yt_dlp', '--no-playlist',
+                   '--extractor-args', 'youtube:player_client=android']
+
+        # 1) quick metadata probe — validates the link before downloading
+        p = subprocess.run(yt_base + ['--skip-download', '--print', '%(title)s', url],
+                           capture_output=True, text=True, timeout=120)
+        title = (p.stdout or '').strip().splitlines()
+        title = title[0][:100] if title else ''
+        if p.returncode != 0 or not title or title == 'NA':
+            err = (p.stderr or '')[-300:].strip()
+            return jsonify({"error": "YouTube ကနေ video info ရမရပါ — link အမှန်စစ်ပါ" + (": " + err if err else "")}), 502
+
+        # 2) download (≤720p mp4, max 2h — protects server disk)
+        out_tmpl = os.path.join(tmpdir, 'video.%(ext)s')
+        p = subprocess.run(yt_base + ['-f', 'bv*[height<=720]+ba/b[height<=720]/b',
+                                     '--merge-output-format', 'mp4',
+                                     '--match-filter', 'duration < 7200',
+                                     '-o', out_tmpl, url],
+                           capture_output=True, text=True, timeout=1500)
+        got = [f for f in os.listdir(tmpdir) if f.startswith('video.')]
+        if p.returncode != 0 or not got:
+            err = (p.stderr or '')[-300:].strip()
+            return jsonify({"error": "Download မရပါ (YouTube က block ထားနိုင်သည်)" + (": " + err if err else "")}), 502
+        in_path = os.path.join(tmpdir, got[0])
+
+        # 3) stash a player copy BEFORE transcribe (big files get replaced by mp3)
+        token = secrets.token_urlsafe(16)
+        os.makedirs(_LINK_CACHE_DIR, exist_ok=True)
+        shutil.copy2(in_path, os.path.join(_LINK_CACHE_DIR, token + '.mp4'))
+        _LINK_CACHE[token] = time.time() + 3 * 3600
+        _sweep_link_cache()
+
+        # 4) transcribe with the shared pipeline
+        items, terr = _transcribe_media_file(in_path, title + '.mp4', api_key, tmpdir)
+        if terr:
+            return jsonify({"error": terr[0]}), terr[1]
+
+        return jsonify({"subtitles": items, "title": title, "videoToken": token})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Download/Transcribe ကြာလွန်းလို့ timeout ဖြစ်သွားပါတယ်"}), 504
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Audio transcription timed out"}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.route('/api/link-video/<token>')
+def link_video(token):
+    """Stream a video previously fetched via /api/fetch-link (3h expiry)."""
+    if not re.fullmatch(r'[A-Za-z0-9_-]{16,64}', token or ''):
+        return jsonify({"error": "bad token"}), 400
+    exp = _LINK_CACHE.get(token)
+    path = os.path.join(_LINK_CACHE_DIR, token + '.mp4')
+    if not exp or exp < time.time() or not os.path.isfile(path):
+        _LINK_CACHE.pop(token, None)
+        return jsonify({"error": "Video သက်တမ်းကုန်သွားပါပြီ — link ကို ပြန် download ဆွဲပါ"}), 410
+    return send_file(path, mimetype='video/mp4', conditional=True)
 
 
 @app.route('/api/health')
@@ -372,6 +492,9 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     .upload-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .link-row { display: flex; gap: 8px; margin-top: 10px; }
+    .link-row input[type="text"] { flex: 1; min-width: 0; }
+    .link-row .upload-btn { white-space: nowrap; }
     .upload-info { display: flex; align-items: center; gap: 12px; }
     .upload-icon {
       width: 42px; height: 42px; min-width: 42px; max-width: 42px;
@@ -591,6 +714,11 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
         <input type="file" id="fileInput" accept=".srt,video/*,audio/*" style="display:none;"/>
         <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+      </div>
+
+      <div class="link-row">
+        <input type="text" id="ytLink" placeholder="YouTube link paste ချပါ — https://youtu.be/..." autocomplete="off"/>
+        <button class="upload-btn" onclick="fetchYouTubeLink()">⬇ Link နဲ့ယူ</button>
       </div>
 
       <div class="grid-2">
@@ -1006,6 +1134,42 @@ HTML_PAGE = """<!DOCTYPE html>
           alert("Error: " + err.message);
           setStatus("Transcription မအောင်မြင်ပါ", 3000);
         }
+      }
+    }
+
+    async function fetchYouTubeLink() {
+      const url = document.getElementById('ytLink').value.trim();
+      if (!url) { alert("YouTube link ထည့်ပါ"); return; }
+      const groqKey = (localStorage.getItem(KEY_GROQ) || '').trim();
+      if (!groqKey) {
+        alert("Audio/Video transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်။");
+        openSettingsModal();
+        return;
+      }
+      setStatus("YouTube ကနေ download ဆွဲနေပါတယ်... (video အရွယ်အစားပေါ် မူတည်ပြီး မိနစ်အနည်းငယ် ကြာနိုင်ပါတယ်)");
+      try {
+        const res = await fetch('/api/fetch-link', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url, apiKey: groqKey})
+        });
+        let d;
+        try { d = await res.json(); }
+        catch(e) { throw new Error("Server error (HTTP " + res.status + ")"); }
+        if (!res.ok || d.error) throw new Error(d.error || "Download failed");
+        uploadedFileName = (d.title || "youtube_video").substring(0, 60);
+        if (currentVideoUrl) { URL.revokeObjectURL(currentVideoUrl); currentVideoUrl = null; }
+        const video = document.getElementById('mainVideo');
+        video.src = '/api/link-video/' + d.videoToken;
+        document.getElementById('videoContainer').style.display = 'block';
+        document.getElementById('followBar').style.display = 'flex';
+        subtitles = d.subtitles;
+        renderList();
+        document.getElementById('ytLink').value = '';
+        setStatus("Download + Transcription အောင်မြင်ပါသည်! 🎉", 4000);
+      } catch(err) {
+        alert("Error: " + err.message);
+        setStatus("Download မအောင်မြင်ပါ", 3000);
       }
     }
 
