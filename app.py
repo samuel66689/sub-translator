@@ -325,6 +325,29 @@ def diag():
     return jsonify(out)
 
 
+@app.route('/api/diag-dl')
+def diag_dl():
+    """TEMPORARY diagnostic: can this server download the deno zip at runtime?
+    Reports the exact error so we know why build-time install fails."""
+    import urllib.request, traceback
+    urls = {
+        "github": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
+        "denoland": "https://dl.deno.land/release/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
+    }
+    out = {}
+    for name, url in urls.items():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                chunk = r.read(1024)
+                out[name] = {"ok": True, "status": r.status,
+                             "first_bytes": chunk[:4].hex(),
+                             "is_zip": chunk[:2] == b'PK'}
+        except Exception as e:
+            out[name] = {"ok": False, "error": repr(e)[:300]}
+    return jsonify(out)
+
+
 @app.route('/api/link-video/<token>')
 def link_video(token):
     """Stream a video previously fetched via /api/fetch-link (3h expiry)."""
