@@ -7,6 +7,8 @@ import secrets
 import tempfile
 import subprocess
 import time
+import zipfile
+import urllib.request
 import requests
 from flask import Flask, request, jsonify, Response, send_file
 
@@ -49,6 +51,47 @@ def _sweep_link_cache():
                 os.remove(os.path.join(_LINK_CACHE_DIR, tok + '.mp4'))
             except OSError:
                 pass
+
+
+_DENO_URL = ('https://github.com/denoland/deno/releases/download/'
+             'v2.9.7/deno-x86_64-unknown-linux-gnu.zip')
+
+
+def _ensure_deno():
+    """Return a working deno binary path, or None.
+
+    deno is the only JS runtime that solves YouTube's PO-token challenge for
+    the android player client (node verified NOT working). Build-time install
+    via build.sh is flaky on some hosts, so this self-heals at runtime: the
+    Render runtime network CAN download the zip (verified 2026-10-09).
+    Idempotent — cheap check when the binary already exists.
+    """
+    p = shutil.which('deno')
+    if p:
+        return p
+    cand = os.path.join(_here_bin, 'deno')
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    for dest_dir in (_here_bin, tempfile.gettempdir()):
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            target = os.path.join(dest_dir, 'deno')
+            if not (os.path.isfile(target) and os.access(target, os.X_OK)):
+                zp = os.path.join(tempfile.gettempdir(), 'deno_dl.zip')
+                urllib.request.urlretrieve(_DENO_URL, zp)
+                with zipfile.ZipFile(zp) as z:
+                    with z.open('deno') as src, open(target, 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                os.chmod(target, 0o755)
+                try:
+                    os.remove(zp)
+                except OSError:
+                    pass
+            if os.access(target, os.X_OK):
+                return target
+        except Exception:
+            continue
+    return None
 
 _FENCE_START = re.compile(r"^```(?:json)?\s*", re.IGNORECASE)
 _FENCE_END = re.compile(r"\s*```$")
@@ -254,11 +297,14 @@ def fetch_link():
         # sys.executable -m yt_dlp: works regardless of PATH/console-script
         # install location (pip user installs, venvs, Render, ...).
         # --force-ipv4: some datacenter IPv6 ranges are harder-blocked by YouTube.
-        # --js-runtimes deno: explicit — only deno solves the PO-token
-        # challenge (node verified NOT working, 2026-10-09).
+        # --js-runtimes deno:<path>: explicit binary — only deno solves the
+        # PO-token challenge (node verified NOT working, 2026-10-09).
+        # _ensure_deno() self-heals a missing build-time install at runtime.
+        deno_path = _ensure_deno()
+        js_runtime = 'deno:%s' % deno_path if deno_path else 'deno'
         yt_base = [sys.executable, '-m', 'yt_dlp', '--no-playlist',
                    '--force-ipv4',
-                   '--js-runtimes', 'deno',
+                   '--js-runtimes', js_runtime,
                    '--extractor-args', 'youtube:player_client=android']
 
         # 1) quick metadata probe — validates the link before downloading
@@ -313,6 +359,7 @@ def diag():
     import shutil
     out = {
         "deno": shutil.which('deno'),
+        "deno_ensured": _ensure_deno(),
         "node": shutil.which('node'),
         "bin_on_path": _here_bin in os.environ.get('PATH', ''),
     }
@@ -322,29 +369,6 @@ def diag():
         out['ytdlp'] = (p.stdout or '').strip() or (p.stderr or '')[-200:]
     except Exception as e:
         out['ytdlp'] = 'error: ' + str(e)
-    return jsonify(out)
-
-
-@app.route('/api/diag-dl')
-def diag_dl():
-    """TEMPORARY diagnostic: can this server download the deno zip at runtime?
-    Reports the exact error so we know why build-time install fails."""
-    import urllib.request, traceback
-    urls = {
-        "github": "https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
-        "denoland": "https://dl.deno.land/release/v2.9.7/deno-x86_64-unknown-linux-gnu.zip",
-    }
-    out = {}
-    for name, url in urls.items():
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                chunk = r.read(1024)
-                out[name] = {"ok": True, "status": r.status,
-                             "first_bytes": chunk[:4].hex(),
-                             "is_zip": chunk[:2] == b'PK'}
-        except Exception as e:
-            out[name] = {"ok": False, "error": repr(e)[:300]}
     return jsonify(out)
 
 
