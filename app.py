@@ -35,7 +35,53 @@ if os.path.isdir(_here_bin):
 # Cache dir for videos fetched via /api/fetch-link, served to the in-app
 # player through /api/link-video/<token>. Tokens expire after 3h.
 _LINK_CACHE_DIR = os.path.join(tempfile.gettempdir(), 'st_link_videos')
-_LINK_CACHE = {}  # token -> expires_at (epoch)
+_LINK_CACHE_FILE = os.path.join(tempfile.gettempdir(), 'st_link_cache.json')
+
+
+class _FileBackedCache:
+    """token -> expires_at (epoch), file-backed JSON so gunicorn's workers
+    (render.yaml runs --workers 2) share tokens. Writes are atomic
+    (temp file + os.replace) to survive concurrent workers."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def _load(self):
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+                return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _save(self, data):
+        tmp = self.path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path)
+        except Exception:
+            pass
+
+    def get(self, token, default=None):
+        return self._load().get(token, default)
+
+    def __setitem__(self, token, value):
+        d = self._load()
+        d[token] = value
+        self._save(d)
+
+    def pop(self, token, default=None):
+        d = self._load()
+        v = d.pop(token, default)
+        self._save(d)
+        return v
+
+    def items(self):
+        return self._load().items()
+
+
+_LINK_CACHE = _FileBackedCache(_LINK_CACHE_FILE)  # token -> expires_at (epoch)
 
 _YT_URL_RE = re.compile(
     r'^(https?://)?(www\.|m\.)?(youtube\.com/(watch|shorts|embed)|youtu\.be/)',
@@ -125,7 +171,7 @@ def parse_srt_time_to_ms(time_str: str) -> int:
 
 @app.errorhandler(413)
 def too_large(_e):
-    return jsonify({"error": "ဖိုင်အရွယ်အစား 100MB ထက် မကျော်ရပါ"}), 413
+    return jsonify({"error": "ဖိုင်အရွယ်အစား 2GB ထက် မကျော်ရပါ"}), 413
 
 
 def _ffmpeg_bin():
@@ -149,11 +195,23 @@ _GROQ_MAX_BYTES = 24 * 1024 * 1024
 _DIRECT_MAX_BYTES = 20 * 1024 * 1024
 
 
-def _groq_transcribe_file(path, filename, api_key):
+class _GroqHttpError(RuntimeError):
+    """Groq HTTP failure that keeps the status code (403 → AssemblyAI fallback)."""
+    def __init__(self, msg, status):
+        super().__init__(msg)
+        self.status = status
+
+
+def _groq_transcribe_file(path, filename, api_key, language=None, prompt=None):
     """POST one audio file to Groq Whisper. Returns (segments, None) or (None, (msg, status))."""
     with open(path, 'rb') as f:
         files = {'file': (filename, f, 'audio/mpeg')}
         data = {'model': 'whisper-large-v3', 'response_format': 'verbose_json'}
+        # language hint (zh/en/my/…) → နာမည်တွေ ပိုမှန်အောင်; prompt → glossary/context
+        if language:
+            data['language'] = language
+        if prompt:
+            data['prompt'] = prompt[:1000]
         headers = {'Authorization': f'Bearer {api_key}'}
         res = http.post(GROQ_URL, headers=headers, files=files, data=data, timeout=600)
     if res.status_code != 200:
@@ -175,7 +233,7 @@ def _audio_duration_sec(path):
         return os.path.getsize(path) / 8000.0  # fallback: ~64 kbit/s
 
 
-def _transcribe_chunked(audio_path, api_key):
+def _transcribe_chunked(audio_path, api_key, language=None, prompt=None):
     """Split very long audio into ~20MB pieces, transcribe each, re-offset timestamps."""
     dur = _audio_duration_sec(audio_path)
     chunk_sec = (20 * 1024 * 1024) / 8000.0  # ~2621s at 64 kbit/s mono
@@ -193,27 +251,129 @@ def _transcribe_chunked(audio_path, api_key):
         if p.returncode != 0 or not os.path.isfile(chunk):
             raise RuntimeError('အသံအပိုင်းခွဲမရပါ — ffmpeg error')
         try:
-            segs, err = _groq_transcribe_file(chunk, f'chunk{i}.mp3', api_key)
+            segs, err = _groq_transcribe_file(chunk, f'chunk{i}.mp3', api_key,
+                                             language=language, prompt=prompt)
         finally:
             if os.path.isfile(chunk):
                 os.remove(chunk)
         if err:
-            raise RuntimeError(err[0])
+            raise _GroqHttpError(err[0], err[1])
         for s in segs:
             if isinstance(s, dict):
                 s['start'] = float(s.get('start') or 0) + start
                 s['end'] = float(s.get('end') or 0) + start
+                # chunk တွေက ၁ စက္ကန့်စီ ထပ်နေလို့ (-t step+1) —
+                # ထပ်နေတဲ့နေရာက စာကြောင်းတွေ နှစ်ခါမပါအောင်၊ နောက်အပိုင်းက
+                # အရင်အပိုင်းရပြီးသားနေရာကို ကျော်ပစ်တယ်
+                # (0.9 = Whisper timestamp တိမ်းယိမ်းမှုအတွက် အနားသတ်)
+                if i > 0 and s['start'] < start + 0.9:
+                    continue
                 all_segs.append(s)
     all_segs.sort(key=lambda s: s.get('start', 0))
     return all_segs
 
 
-def _transcribe_media_file(in_path, filename, api_key, workdir):
+# ------------------------------------------------- AssemblyAI fallback
+# Groq က 403 IP-block ထိတဲ့အခါ သုံးတဲ့ fallback (audio-dub-studio ကနေ port).
+_AAI_BASE = "https://api.assemblyai.com/v2"
+
+
+def _aai_words_to_segments(words, max_gap=0.7, max_dur=8.0, max_words=25):
+    """AssemblyAI words (ms timestamps) → [{'start','end','text'}] စာပိုဒ်တွေ."""
+    segs, cur, cur_start = [], [], None
+    for w in words:
+        text = (w.get("text") or "").strip()
+        if not text:
+            continue
+        s, e = w.get("start", 0) / 1000.0, w.get("end", 0) / 1000.0
+        if cur and cur_start is not None:
+            gap = s - cur[-1][1]
+            dur = e - cur_start
+            if gap > max_gap or dur > max_dur or len(cur) >= max_words \
+                    or cur[-1][2][-1:] in ".!?":
+                segs.append({"start": cur_start, "end": cur[-1][1],
+                             "text": " ".join(t for _, _, t in cur)})
+                cur, cur_start = [], None
+        if cur_start is None:
+            cur_start = s
+        cur.append((s, e, text))
+    if cur:
+        segs.append({"start": cur_start, "end": cur[-1][1],
+                     "text": " ".join(t for _, _, t in cur)})
+    return [sg for sg in segs if sg["end"] > sg["start"] and sg["text"]]
+
+
+def _transcribe_assemblyai(audio_path, api_key, language=None):
+    """AssemblyAI: upload → transcript → poll → [{'start','end','text'}]."""
+    def _h(json_ct=False):
+        h = {"authorization": api_key}
+        if json_ct:
+            h["content-type"] = "application/json"
+        return h
+
+    with open(audio_path, "rb") as f:
+        r = requests.post(f"{_AAI_BASE}/upload", headers=_h(), data=f,
+                          timeout=300)
+    if r.status_code != 200:
+        raise RuntimeError(f"AssemblyAI upload ပျက်သွားတယ် (HTTP {r.status_code})")
+    upload_url = r.json().get("upload_url")
+    if not upload_url:
+        raise RuntimeError("AssemblyAI upload: upload_url ပြန်မရဘူး")
+
+    # (2026-10: speech_model (singular) deprecated → speech_models list သုံး)
+    payload = {"audio_url": upload_url, "speech_models": ["universal-2"]}
+    if language:
+        payload["language_code"] = language
+    else:
+        payload["language_detection"] = True
+
+    def _request_transcript(pl):
+        return requests.post(f"{_AAI_BASE}/transcript", headers=_h(True),
+                             json=pl, timeout=60)
+
+    r = _request_transcript(payload)
+    if r.status_code != 200 and language:
+        # language_code မထောက်ခံရင် auto-detect နဲ့ ပြန်ကြိုး
+        payload.pop("language_code", None)
+        payload["language_detection"] = True
+        r = _request_transcript(payload)
+    if r.status_code != 200:
+        try:
+            msg = r.json().get("error") or f"HTTP {r.status_code}"
+        except Exception:
+            msg = f"HTTP {r.status_code}"
+        raise RuntimeError(f"AssemblyAI transcript ပျက်သွားတယ်: {msg}")
+    tid = r.json().get("id")
+    if not tid:
+        raise RuntimeError("AssemblyAI: transcript id ပြန်မရဘူး")
+
+    waited = 0.0
+    while True:
+        r = requests.get(f"{_AAI_BASE}/transcript/{tid}", headers=_h(),
+                         timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"AssemblyAI status ပျက်သွားတယ် (HTTP {r.status_code})")
+        body = r.json()
+        status = body.get("status")
+        if status == "completed":
+            return _aai_words_to_segments(body.get("words") or [])
+        if status == "error":
+            raise RuntimeError(
+                f"AssemblyAI transcribe ပျက်သွားတယ်: {body.get('error') or 'unknown'}")
+        if waited >= 900:
+            raise RuntimeError("AssemblyAI: အချိန်ကုန်သွားတယ် — ပြန်ကြိုးစားပါ")
+        time.sleep(3.0)
+        waited += 3.0
+
+
+def _transcribe_media_file(in_path, filename, api_key, workdir,
+                          language=None, prompt=None, assembly_key=None):
     """Transcribe an already-saved media file at in_path.
 
     Returns (items, None) on success, (None, (msg, http_code)) on failure.
     NOTE: for files > _DIRECT_MAX_BYTES the original in_path is replaced by
     an extracted mp3 (callers needing the original must copy it first).
+    Groq 403 (IP block) → AssemblyAI fallback (assembly_key ရှိရင်).
     """
     audio_path = in_path
     audio_name = filename or 'audio'
@@ -230,13 +390,23 @@ def _transcribe_media_file(in_path, filename, api_key, workdir):
         if p.returncode != 0 or not os.path.isfile(audio_path):
             return None, ("ffmpeg နဲ့ အသံထုတ်မရပါ — ဖိုင်မှာ အသံလမ်းကြောင်း (audio track) မရှိတာဖြစ်နိုင်ပါတယ်", 400)
 
-    if os.path.getsize(audio_path) <= _GROQ_MAX_BYTES:
-        segments, err = _groq_transcribe_file(audio_path, audio_name, api_key)
-        if err:
-            return None, err
-    else:
-        # Still too big (roughly >43 min): transcribe in chunks and stitch.
-        segments = _transcribe_chunked(audio_path, api_key)
+    try:
+        if os.path.getsize(audio_path) <= _GROQ_MAX_BYTES:
+            segments, err = _groq_transcribe_file(audio_path, audio_name, api_key,
+                                                 language=language, prompt=prompt)
+            if err:
+                raise _GroqHttpError(err[0], err[1])
+        else:
+            # Still too big (roughly >43 min): transcribe in chunks and stitch.
+            segments = _transcribe_chunked(audio_path, api_key,
+                                          language=language, prompt=prompt)
+    except _GroqHttpError as e:
+        # Groq 403 = datacenter IP block → AssemblyAI နဲ့ အလိုအလျောက်ဆက်လုပ်
+        if e.status == 403 and assembly_key:
+            segments = _transcribe_assemblyai(audio_path, assembly_key,
+                                             language=language)
+        else:
+            return None, (str(e), e.status)
 
     items = [
         {
@@ -256,6 +426,9 @@ def _transcribe_media_file(in_path, filename, api_key, workdir):
 def transcribe():
     file = request.files.get('file')
     api_key = request.form.get('apiKey')
+    language = (request.form.get('language') or '').strip() or None
+    prompt = (request.form.get('prompt') or '').strip() or None
+    assembly_key = (request.form.get('assemblyKey') or '').strip() or None
     if not file or not api_key:
         return jsonify({"error": "Video/Audio transcribe လုပ်ရန် Groq API Key လိုအပ်ပါသည်"}), 400
 
@@ -265,7 +438,9 @@ def transcribe():
         in_path = os.path.join(tmpdir, 'upload' + ext)
         file.save(in_path)  # streamed to disk — big files never sit in RAM
 
-        items, err = _transcribe_media_file(in_path, file.filename, api_key, tmpdir)
+        items, err = _transcribe_media_file(in_path, file.filename, api_key, tmpdir,
+                                           language=language, prompt=prompt,
+                                           assembly_key=assembly_key)
         if err:
             return jsonify({"error": err[0]}), err[1]
         return jsonify({"subtitles": items})
@@ -337,7 +512,9 @@ def fetch_link():
         _sweep_link_cache()
 
         # 4) transcribe with the shared pipeline
-        items, terr = _transcribe_media_file(in_path, title + '.mp4', api_key, tmpdir)
+        aai_key = (data.get('assemblyKey') or '').strip() or None
+        items, terr = _transcribe_media_file(in_path, title + '.mp4', api_key, tmpdir,
+                                            assembly_key=aai_key)
         if terr:
             return jsonify({"error": terr[0]}), terr[1]
 
@@ -446,6 +623,20 @@ def translate():
         "ထို့အပြင် \u2014 use conversational ones instead "
         "(ဒါကြောင့်, ဒါပေမဲ့, ပြီးတော့)."
     )
+    # မြန်မာလို ပြန်တဲ့အခါ တခြား script တွေ ညှပ်မပါစေရန် (audio-dub-studio _MYANMAR_ONLY)
+    _MYANMAR_ONLY = (
+        " Write every 'translatedText' value ONLY in Myanmar (Burmese) Unicode script — "
+        "never mix in Tamil, Devanagari/Hindi, Thai, Chinese, Korean, Japanese, "
+        "or any other non-Myanmar script, not even for names or sound tags."
+    )
+    # စာတန်းထိုးနဲ့ TTS အတွက် စည်းမျဉ်းတိုများ
+    _TTS_SUB_RULES = (
+        " Strip sound-effect tags like [Music], (laughs), (applause) — never translate or keep them. "
+        "Use ကျွန်တော် for male speakers and ကျွန်မ for female speakers; "
+        "keep honorifics (ဦး/ဒေါ်/ကို/မ) consistent per character across all subtitles. "
+        "Write numbers as spoken Burmese words, not digits. "
+        "Subtitle length: aim ≤ ~40 Burmese characters per line, max 2 lines per subtitle."
+    )
 
     system_prompt = (
         f"You are a professional audiovisual subtitle translator. "
@@ -465,6 +656,7 @@ def translate():
     # လူ့လက်ရာနဲ့တူအောင် style rules — Burmese target အတွက်သာ (formal tone မာတော့ connector ban မထည့်)
     if target_lang.strip().lower() in ('burmese', 'myanmar', 'မြန်မာ'):
         system_prompt += _HUMAN_STYLE
+        system_prompt += _MYANMAR_ONLY + _TTS_SUB_RULES
         if tone_style in ('natural', 'casual'):
             system_prompt += _HUMAN_STYLE_SPOKEN
 
@@ -516,7 +708,19 @@ def translate():
         if isinstance(translations, dict):
             translations = translations.get('translations', translations.get('subtitles', []))
 
-        return jsonify({"translations": translations if isinstance(translations, list) else []})
+        # Gemini က id တချို့ ပြန်မပေးရင် client က success လို့ ထင်နေမှာ —
+        # ကျန်ခဲ့တဲ့ id တွေ ပြန်ပေးလိုက်မယ်
+        got_ids = set()
+        if isinstance(translations, list):
+            for t in translations:
+                try:
+                    got_ids.add(int(t.get('id')))
+                except Exception:
+                    pass
+        missing_ids = [s["id"] for s in payload_data if s["id"] not in got_ids]
+
+        return jsonify({"translations": translations if isinstance(translations, list) else [],
+                        "missingIds": missing_ids})
 
     except requests.exceptions.Timeout:
         return jsonify({"error": "Server Timeout ဖြစ်သွားပါသည် (Block Size ကို လျှော့ပေးပါ)"}), 504
@@ -795,7 +999,15 @@ HTML_PAGE = """<!DOCTYPE html>
           </div>
         </div>
         <input type="file" id="fileInput" accept=".srt,video/*,audio/*" style="display:none;"/>
-        <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <select id="transcribeLang" title="Transcribe ဘာသာစကား hint" style="padding: 9px 6px; border-radius: 10px; background: #2a0f22; color: #ffe4e6; border: 1px solid #7c2d5a; font-size: 12px;">
+            <option value="">Auto</option>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+            <option value="my">မြန်မာ</option>
+          </select>
+          <button class="upload-btn" onclick="document.getElementById('fileInput').click()">Choose File</button>
+        </div>
       </div>
 
 
@@ -850,7 +1062,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <footer>
     <div class="footer-info">
       <span>Model: <b id="footerModelName" style="color:#fff;">gemini-3.5-flash-lite</b></span>
-      <span>Block: <b id="footerBlockSize" style="color:#fff;">25</b> | Delay: <b id="footerDelaySec" style="color:#fff;">15s</b></span>
+      <span>Block: <b id="footerBlockSize" style="color:#fff;">25</b> | Delay: <b id="footerDelaySec" style="color:#fff;">4s</b></span>
     </div>
     <div class="footer-btns">
       <button class="btn-translate" onclick="startTranslation()" id="btnTranslate">Translate All ⚡</button>
@@ -894,8 +1106,9 @@ HTML_PAGE = """<!DOCTYPE html>
           <div>
             <label>Delay (စက္ကန့်)</label>
             <select id="modalDelaySec">
-              <option value="5">5s (အမြန်)</option>
-              <option value="15" selected>15s (Safe)</option>
+              <option value="4" selected>4s (မြန်)</option>
+              <option value="5">5s</option>
+              <option value="15">15s (Safe)</option>
               <option value="30">30s (RPM 2 နှုန်း)</option>
             </select>
           </div>
@@ -909,6 +1122,16 @@ HTML_PAGE = """<!DOCTYPE html>
         <div>
           <label>Groq API Key (Audio Transcribe အတွက်)</label>
           <input type="password" id="modalGroqKey" placeholder="gsk_...">
+        </div>
+
+        <div>
+          <label>AssemblyAI API Key (Groq 403 fallback — မထည့်လည်းရပါတယ်)</label>
+          <input type="password" id="modalAaiKey" placeholder="...">
+        </div>
+
+        <div>
+          <label>Transcribe hint — နာမည်/စကားလုံးများ (optional)</label>
+          <input type="text" id="modalTranscribeHint" placeholder="ဥပမာ: Wei Wuxian, Lan Wangji">
         </div>
 
         <div>
@@ -998,6 +1221,9 @@ HTML_PAGE = """<!DOCTYPE html>
     const KEY_BLOCK_SIZE = 'thiri_koko_block_size';
     const KEY_DELAY_SEC = 'thiri_koko_delay_sec';
     const KEY_GLOSSARY = 'thiri_koko_glossary';
+    const KEY_AAI = 'thiri_koko_aai_key';
+    const KEY_TRANSCRIBE_HINT = 'thiri_koko_transcribe_hint';
+    const KEY_AUTOSAVE = 'thiri_koko_autosave';
     const KEY_FOLLOW = 'thiri_koko_follow';
     const KEY_AUTOPAUSE = 'thiri_koko_autopause';
 
@@ -1027,10 +1253,12 @@ HTML_PAGE = """<!DOCTYPE html>
     window.addEventListener('DOMContentLoaded', () => {
       document.getElementById('modalGroqKey').value = localStorage.getItem(KEY_GROQ) || '';
       document.getElementById('modalGeminiKey').value = localStorage.getItem(KEY_GEMINI) || '';
+      document.getElementById('modalAaiKey').value = localStorage.getItem(KEY_AAI) || '';
+      document.getElementById('modalTranscribeHint').value = localStorage.getItem(KEY_TRANSCRIBE_HINT) || '';
       
       const savedModel = localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite';
       const savedBlock = localStorage.getItem(KEY_BLOCK_SIZE) || '25';
-      const savedDelay = localStorage.getItem(KEY_DELAY_SEC) || '15';
+      const savedDelay = localStorage.getItem(KEY_DELAY_SEC) || '4';
 
       document.getElementById('modalGeminiSelect').value = savedModel;
       document.getElementById('modalBlockSize').value = savedBlock;
@@ -1090,6 +1318,16 @@ HTML_PAGE = """<!DOCTYPE html>
           closeSettingsModal(); closeGuideModal(); closeDownloadModal(); toggleDrawer(false);
         }
       });
+
+      // auto-save ပြန်ယူ: စာတန်းအသစ်မရှိသေးရင် သိမ်းထားတာပြန်ထည့်
+      try {
+        const saved = JSON.parse(localStorage.getItem(KEY_AUTOSAVE) || 'null');
+        if (Array.isArray(saved) && saved.length && subtitles.length === 0) {
+          subtitles = saved;
+          renderList();
+          setStatus("Auto-saved project ပြန်လည်ရယူပြီးပါပြီ 💾", 4000);
+        }
+      } catch (e) { /* save ပျက်နေရင် ကျော် */ }
     });
 
     function toggleDrawer(open) {
@@ -1108,9 +1346,12 @@ HTML_PAGE = """<!DOCTYPE html>
       const selectedModel = document.getElementById('modalGeminiSelect').value;
       const blockSize = document.getElementById('modalBlockSize').value;
       const delaySec = document.getElementById('modalDelaySec').value;
+      const aaiKey = document.getElementById('modalAaiKey').value.trim();
 
       localStorage.setItem(KEY_GROQ, gKey);
       localStorage.setItem(KEY_GEMINI, gmKey);
+      localStorage.setItem(KEY_AAI, aaiKey);
+      localStorage.setItem(KEY_TRANSCRIBE_HINT, document.getElementById('modalTranscribeHint').value.trim());
       localStorage.setItem(KEY_GEMINI_MODEL, selectedModel);
       localStorage.setItem(KEY_BLOCK_SIZE, blockSize);
       localStorage.setItem(KEY_DELAY_SEC, delaySec);
@@ -1122,6 +1363,16 @@ HTML_PAGE = """<!DOCTYPE html>
 
       closeSettingsModal();
       setStatus("Settings မှတ်သားပြီးပါပြီ!", 3000);
+    }
+
+    // Project auto-save: subtitles ပြောင်းတိုင်း localStorage ထဲ debounce နဲ့သိမ်း
+    let autosaveTimer = null;
+    function scheduleAutosave() {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = setTimeout(() => {
+        try { localStorage.setItem(KEY_AUTOSAVE, JSON.stringify(subtitles)); }
+        catch (e) { /* quota ပြည့်ရင် ကျော် */ }
+      }, 1500);
     }
 
     function setStatus(text, duration = 0) {
@@ -1182,6 +1433,10 @@ HTML_PAGE = """<!DOCTYPE html>
         const fd = new FormData();
         fd.append('file', file);
         fd.append('apiKey', groqKey);
+        fd.append('language', document.getElementById('transcribeLang').value || '');
+        fd.append('prompt', localStorage.getItem(KEY_TRANSCRIBE_HINT) || '');
+        const aaiKey = (localStorage.getItem(KEY_AAI) || '').trim();
+        if (aaiKey) fd.append('assemblyKey', aaiKey);
 
         try {
           // XHR instead of fetch: shows live upload % so we can tell whether a
@@ -1303,6 +1558,7 @@ HTML_PAGE = """<!DOCTYPE html>
         }
       });
       document.getElementById('subCount').innerText = subtitles.length;
+      scheduleAutosave();
     }
 
     // ---------- Merge / Split subtitles ----------
@@ -1456,6 +1712,7 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function renderList() {
+      scheduleAutosave();
       timeIndex = subtitles.map(s => ({ st: timeToSec(s.startTime), et: timeToSec(s.endTime), s }));
       activeIdx = currentVideoUrl ? calcActive(document.getElementById('mainVideo').currentTime) : -1;
       const box = document.getElementById('subList');
@@ -1474,8 +1731,8 @@ HTML_PAGE = """<!DOCTYPE html>
             <button class="btn-retrans" onclick="splitSubtitle(${idx})" title="ဒီစာကြောင်းကို ၂ ပိုင်းခွဲမယ်">✂️</button>
             ${idx < subtitles.length - 1 ? `<button class="btn-retrans" onclick="mergeWithNext(${idx})" title="နောက်စာကြောင်းနဲ့ ပေါင်းမယ်">🔗</button>` : ''}
           </div>
-          <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim()">${escapeHtml(s.originalText)}</div>
-          <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value">${escapeHtml(s.translatedText)}</textarea>
+          <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim(); scheduleAutosave()">${escapeHtml(s.originalText)}</div>
+          <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value; scheduleAutosave()">${escapeHtml(s.translatedText)}</textarea>
         </div>
       `).join('');
     }
@@ -1506,6 +1763,7 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       if (!res.ok || data.error) throw new Error(data.error || "Request failed");
+      requestTranslation.lastMissing = Array.isArray(data.missingIds) ? data.missingIds : [];
       return Array.isArray(data.translations) ? data.translations : [];
     }
 
@@ -1543,7 +1801,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const geminiKey = (localStorage.getItem(KEY_GEMINI) || '').trim();
       const modelName = (localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite').trim();
       const chunkSize = parseInt(localStorage.getItem(KEY_BLOCK_SIZE) || '25', 10);
-      const cooldownSec = parseInt(localStorage.getItem(KEY_DELAY_SEC) || '15', 10);
+      const cooldownSec = parseInt(localStorage.getItem(KEY_DELAY_SEC) || '4', 10);
 
       if (!geminiKey) {
         alert("Gemini API Key ထည့်သွင်းပေးပါ (Settings တွင် ထည့်နိုင်ပါသည်)");
@@ -1561,6 +1819,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const byId = new Map(subtitles.map(s => [s.id, s]));
       let completedCount = subtitles.length - pending.length;
       const failedIds = [];
+      const missingIds = [];
       updateProgress(completedCount, subtitles.length);
 
       for (let i = 0; i < pending.length; i += chunkSize) {
@@ -1587,6 +1846,10 @@ HTML_PAGE = """<!DOCTYPE html>
               refreshTranslatedTexts();  // ရိုက်နေတဲ့စာ မပျက်အောင် in-place update
             }
             success = true;
+            // AI က id တချို့ ပြန်မပေးရင် တိတ်တိတ်လေး မကျော်ဘဲ စုထားမယ်
+            if (requestTranslation.lastMissing && requestTranslation.lastMissing.length) {
+              missingIds.push(...requestTranslation.lastMissing);
+            }
 
             const isLastChunk = (i + chunkSize) >= pending.length;
             if (!isLastChunk && isTranslating) {
@@ -1622,6 +1885,9 @@ HTML_PAGE = """<!DOCTYPE html>
       if (failedIds.length) {
         const shown = failedIds.slice(0, 10).join(', ') + (failedIds.length > 10 ? '…' : '');
         setStatus(`ပြီးစီးပါပြီ — ${failedIds.length} ကြောင်း မအောင်မြင်ပါ (#${shown}). Re-translate နဲ့ တစ်ကြောင်းချင်း ပြန်လုပ်နိုင်ပါတယ်။`, 8000);
+      } else if (missingIds.length) {
+        const shown = missingIds.slice(0, 10).join(', ') + (missingIds.length > 10 ? '…' : '');
+        setStatus(`သတိပေးချက် — ${missingIds.length} ကြောင်း AI က ပြန်မပေးပါ (#${shown})။ Re-translate နဲ့ ပြန်လုပ်နိုင်ပါတယ်။`, 8000);
       } else {
         setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
       }
