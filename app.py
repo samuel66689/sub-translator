@@ -889,6 +889,10 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #2b0b1f; border: 1px solid rgba(244, 114, 182, 0.3);
       color: #ffe4e6; font-size: 11px; font-weight: 600; padding: 11px 12px; border-radius: 12px; cursor: pointer;
     }
+    .btn-danger {
+      background: #3a0d18; border: 1px solid rgba(248, 113, 113, 0.55);
+      color: #fecaca; font-size: 11px; font-weight: 600; padding: 11px 12px; border-radius: 12px; cursor: pointer;
+    }
 
     /* Modals & Drawer */
     .modal-overlay {
@@ -1069,6 +1073,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <button class="btn-export" onclick="downloadOriginalSRT()">Orig .SRT</button>
       <button class="btn-export" onclick="downloadTranslatedSRT()">Trans .SRT</button>
       <button class="btn-export" onclick="autoSplitLongLines()" title="ရှည်လွန်းသောစာကြောင်းများ အလိုအလျောက်ခွဲမယ်">✂️ Auto-split</button>
+      <button class="btn-danger" onclick="clearProject()" title="autosave အပါအဝင် project အဟောင်းဖျက်ပြီး အသစ်စ">🗑️ New</button>
     </div>
   </footer>
 
@@ -1373,6 +1378,17 @@ HTML_PAGE = """<!DOCTYPE html>
         try { localStorage.setItem(KEY_AUTOSAVE, JSON.stringify(subtitles)); }
         catch (e) { /* quota ပြည့်ရင် ကျော် */ }
       }, 1500);
+    }
+
+    // 🗑️ New project: autosave အပါအဝင် အဟောင်းဖျက်ပြီး အသစ်စ
+    function clearProject() {
+      if (!subtitles.length) { setStatus("ရှင်းစရာ project မရှိပါ", 2500); return; }
+      if (!confirm("Project အဟောင်းကို ဖျက်ပြီး အသစ်စမလား?\n(autosave လည်း ပျက်မယ်)")) return;
+      clearTimeout(autosaveTimer);
+      try { localStorage.removeItem(KEY_AUTOSAVE); } catch (e) {}
+      subtitles = [];
+      renderList();
+      setStatus("🗑️ Project အသစ် — autosave ရှင်းပြီးပြီ", 3000);
     }
 
     function setStatus(text, duration = 0) {
