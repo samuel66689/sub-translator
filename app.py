@@ -729,6 +729,98 @@ def translate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ------------------------------------------------- QC: translated-line validation + retry
+# audio-dub-studio ရဲ့ _qc_bad_reason / qc_retranslate port.
+# စည်းမျဉ်း: Burmese-only (numbers-as-words per translate prompt);
+# ပျက်တဲ့လိုင်း → model တူ, temp 0.1 နဲ့ တစ်ကြောင်းချင်း ၂ ကြိမ်ပြန်ပြ;
+# မရရင် UI မှာ အနီပြ (အလိုအလျောက် မဖျက်).
+_QC_FOREIGN_RE = re.compile(
+    r"[\u0B80-\u0BFF\u0900-\u097F\u0E00-\u0E7F\u3040-\u30FF\uAC00-\uD7AF\u4E00-\u9FFF]")
+
+
+def _qc_bad_reason(text):
+    t = (text or "").strip()
+    if not t:
+        return "စာသားလွတ်နေတယ်"
+    if _QC_FOREIGN_RE.search(t):
+        return "တခြားဘာသာစကား စာလုံး ပါနေတယ်"
+    if re.search(r"[\u1000-\u109F]", t) and re.search(r"[A-Za-z]", t):
+        return "မြန်မာနဲ့ အင်္ဂလိပ် ရောနေတယ်"
+    if not re.search(r"[\u1000-\u109F]", t) and re.search(r"[A-Za-z]{3,}", t):
+        return "ဘာသာမပြန်ရသေးဘူး (မူရင်းအတိုင်း ကျန်နေတယ်)"
+    return None
+
+
+_QC_SYS = (
+    "You translate ONE video subtitle line into natural SPOKEN Burmese (Myanmar). "
+    "Output ONLY Myanmar (Burmese) Unicode script \u2014 never mix in Tamil, "
+    "Devanagari/Hindi, Thai, Chinese, Korean, Japanese, Latin, or any other "
+    "non-Myanmar script, not even for names. Keep the meaning, keep it concise. "
+    "Return ONLY a JSON object with key 'translatedText'.")
+
+
+def _qc_retranslate_one(api_key, model_id, src_text):
+    """တစ်ကြောင်းတည်း ပြန်ပြန် (temp 0.1). ရရင် text, မရရင် None."""
+    body = {
+        "contents": [{"role": "user", "parts": [
+            {"text": _QC_SYS},
+            {"text": json.dumps({"text": src_text}, ensure_ascii=False)}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
+    }
+    try:
+        res = http.post(f"{GEMINI_BASE_URL}{model_id}:generateContent",
+                        headers={"Content-Type": "application/json",
+                                 "x-goog-api-key": api_key},
+                        json=body, timeout=60)
+    except Exception:
+        return None
+    if res.status_code != 200:
+        return None
+    try:
+        cands = res.json().get("candidates") or []
+        parts = (cands[0].get("content") or {}).get("parts") or []
+        raw = "".join(p.get("text", "") for p in parts)
+        data = json.loads(strip_markdown_fences(raw))
+    except Exception:
+        return None
+    t = (data.get("translatedText") or "").strip() if isinstance(data, dict) else ""
+    return t or None
+
+
+@app.route('/api/qc', methods=['POST'])
+def qc():
+    req = request.get_json(silent=True) or {}
+    items = req.get("items") or []
+    api_key = (req.get("geminiKey") or "").strip()
+    model_id = _MODEL_CLEAN.sub("", (req.get("modelName") or DEFAULT_MODEL).strip()) or DEFAULT_MODEL
+    if not api_key:
+        return jsonify({"error": "Gemini API Key လိုအပ်ပါသည်"}), 400
+    bad = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        r = _qc_bad_reason(it.get("translatedText", ""))
+        if r:
+            bad[it.get("id")] = (r, it)
+    fixed, still_bad = [], []
+    for _id, (reason, it) in bad.items():
+        src = (it.get("originalText") or "").strip()
+        if not src:
+            still_bad.append({"id": _id, "reason": reason})
+            continue
+        ok = False
+        for _ in range(2):
+            new_t = _qc_retranslate_one(api_key, model_id, src)
+            if new_t and not _qc_bad_reason(new_t):
+                fixed.append({"id": _id, "translatedText": new_t})
+                ok = True
+                break
+        if not ok:
+            still_bad.append({"id": _id, "reason": reason})
+    return jsonify({"checked": len(items), "bad": len(bad),
+                    "fixed": fixed, "stillBad": still_bad})
+
+
 HTML_PAGE = """<!DOCTYPE html>
 <html lang="my">
 <head>
@@ -893,6 +985,9 @@ HTML_PAGE = """<!DOCTYPE html>
       background: #3a0d18; border: 1px solid rgba(248, 113, 113, 0.55);
       color: #fecaca; font-size: 11px; font-weight: 600; padding: 11px 12px; border-radius: 12px; cursor: pointer;
     }
+    .sub-item.qc-bad { border-color: rgba(248, 113, 113, 0.7); box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.4); }
+    .qc-flag { font-size: 10px; color: #fca5a5; background: rgba(248, 113, 113, 0.12);
+      border: 1px solid rgba(248, 113, 113, 0.35); border-radius: 8px; padding: 4px 8px; margin: 6px 0 2px; }
 
     /* Modals & Drawer */
     .modal-overlay {
@@ -1074,6 +1169,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <button class="btn-export" onclick="downloadTranslatedSRT()">Trans .SRT</button>
       <button class="btn-export" onclick="autoSplitLongLines()" title="ရှည်လွန်းသောစာကြောင်းများ အလိုအလျောက်ခွဲမယ်">✂️ Auto-split</button>
       <button class="btn-danger" onclick="clearProject()" title="autosave အပါအဝင် project အဟောင်းဖျက်ပြီး အသစ်စ">🗑️ New</button>
+      <button class="btn-export" onclick="runQC(null, true)" title="ဘာသာပြန်ပြီးသားလိုင်းတွေ အရည်အသွေးစစ် + အလိုအလျောက် ပြန်ပြင်">🔍 QC</button>
     </div>
   </footer>
 
@@ -1740,7 +1836,7 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       box.innerHTML = subtitles.map((s, idx) => `
-        <div class="sub-item${idx === activeIdx ? ' active' : ''}">
+        <div class="sub-item${idx === activeIdx ? ' active' : ''}${s.qcBad ? ' qc-bad' : ''}">
           <div class="sub-header">
             <span class="sub-id" data-start="${escapeHtml(s.startTime)}" onclick="seekVideoTo(this.dataset.start)">#${s.id} (${escapeHtml(s.startTime.split(',')[0])}) ▶</span>
             <button class="btn-retrans" onclick="retranslateSingle(${s.id})">🔄 Re-translate</button>
@@ -1748,7 +1844,8 @@ HTML_PAGE = """<!DOCTYPE html>
             ${idx < subtitles.length - 1 ? `<button class="btn-retrans" onclick="mergeWithNext(${idx})" title="နောက်စာကြောင်းနဲ့ ပေါင်းမယ်">🔗</button>` : ''}
           </div>
           <div class="sub-orig" contenteditable="plaintext-only" onblur="subtitles[${idx}].originalText = this.innerText.trim(); scheduleAutosave()">${escapeHtml(s.originalText)}</div>
-          <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value; scheduleAutosave()">${escapeHtml(s.translatedText)}</textarea>
+          ${s.qcBad ? `<div class="qc-flag">⚠️ ${escapeHtml(s.qcBad)} — ကိုယ်တိုင်ပြင်ပေးပါ</div>` : ''}
+          <textarea rows="2" onchange="subtitles[${idx}].translatedText = this.value; subtitles[${idx}].qcBad = null; var _ci = this.closest('.sub-item'); if (_ci) { _ci.classList.remove('qc-bad'); var _qf = _ci.querySelector('.qc-flag'); if (_qf) _qf.remove(); } scheduleAutosave()">${escapeHtml(s.translatedText)}</textarea>
         </div>
       `).join('');
     }
@@ -1812,6 +1909,44 @@ HTML_PAGE = """<!DOCTYPE html>
       setStatus("ရပ်တန့်လိုက်ပါပြီ", 3000);
     }
 
+    // 🔍 QC: validate translated lines -> auto-retry bad ones (same model, temp 0.1 x2)
+    // survivors get red-flagged (never auto-deleted). onlyIds=null -> all translated.
+    async function runQC(onlyIds, manual) {
+      const items = subtitles.filter(s => s.translatedText && s.translatedText.trim()
+        && (!onlyIds || onlyIds.indexOf(s.id) !== -1));
+      if (!items.length) { if (manual) alert("စစ်စရာ ဘာသာပြန်ပြီးသားလိုင်း မရှိပါ"); return; }
+      const geminiKey = (localStorage.getItem(KEY_GEMINI) || '').trim();
+      const modelName = (localStorage.getItem(KEY_GEMINI_MODEL) || 'gemini-3.5-flash-lite').trim();
+      if (!geminiKey) { if (manual) alert("Gemini API Key လိုအပ်ပါသည်"); return; }
+      setStatus(`🔍 အရည်အသွေးစစ်နေပါသည် (${items.length} လိုင်း)...`);
+      try {
+        const res = await fetch('/api/qc', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            items: items.map(s => ({id: s.id, originalText: s.originalText, translatedText: s.translatedText})),
+            geminiKey: geminiKey, modelName: modelName
+          })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'QC failed');
+        const byId = new Map(subtitles.map(s => [s.id, s]));
+        (data.fixed || []).forEach(f => {
+          const it = byId.get(Number(f.id));
+          if (it) { it.translatedText = f.translatedText; it.qcBad = null; }
+        });
+        (data.stillBad || []).forEach(b => {
+          const it = byId.get(Number(b.id));
+          if (it) it.qcBad = b.reason;
+        });
+        renderList();
+        const nf = (data.fixed || []).length, nb = (data.stillBad || []).length;
+        if (nf || nb) setStatus(`🔍 QC ပြီးပြီ — ${nf} လိုင်း ပြင်ပြီးပြီ${nb ? `, ${nb} လိုင်း ကိုယ်တိုင်စစ်ပေးပါ ⚠️` : ' 🎉'}`, 7000);
+        else setStatus("🔍 QC ပြီးပြီ — အားလုံး အဆင်ပြေတယ် 🎉", 4000);
+      } catch (e) {
+        setStatus("🔍 QC မအောင်မြင်ပါ: " + e.message, 5000);
+      }
+    }
+
     async function startTranslation() {
       if (isTranslating) return;
       const geminiKey = (localStorage.getItem(KEY_GEMINI) || '').trim();
@@ -1836,6 +1971,7 @@ HTML_PAGE = """<!DOCTYPE html>
       let completedCount = subtitles.length - pending.length;
       const failedIds = [];
       const missingIds = [];
+      const qcNewIds = [];
       updateProgress(completedCount, subtitles.length);
 
       for (let i = 0; i < pending.length; i += chunkSize) {
@@ -1855,7 +1991,7 @@ HTML_PAGE = """<!DOCTYPE html>
               let applied = 0;
               translations.forEach(t => {
                 const item = byId.get(Number(t.id));
-                if (item) { item.translatedText = t.translatedText; applied++; }
+                if (item) { item.translatedText = t.translatedText; applied++; qcNewIds.push(Number(t.id)); }
               });
               completedCount += applied;
               updateProgress(completedCount, subtitles.length);
@@ -1896,16 +2032,24 @@ HTML_PAGE = """<!DOCTYPE html>
         }
       }
 
+      // 🔍 QC auto-run for newly translated lines (skip if user stopped)
+      let qcNote = "";
+      if (isTranslating && qcNewIds.length) {
+        const qr = await runQC(qcNewIds, false);
+        if (qr && (qr.fixed || qr.bad))
+          qcNote = ` 🔍 QC: ${qr.fixed} လိုင်း ပြင်ပြီးပြီ${qr.bad ? `, ${qr.bad} လိုင်း ကိုယ်တိုင်စစ်ပေးပါ ⚠️` : ""}`;
+      }
+
       isTranslating = false;
       document.getElementById('btnStop').style.display = 'none';
       if (failedIds.length) {
         const shown = failedIds.slice(0, 10).join(', ') + (failedIds.length > 10 ? '…' : '');
-        setStatus(`ပြီးစီးပါပြီ — ${failedIds.length} ကြောင်း မအောင်မြင်ပါ (#${shown}). Re-translate နဲ့ တစ်ကြောင်းချင်း ပြန်လုပ်နိုင်ပါတယ်။`, 8000);
+        setStatus(`ပြီးစီးပါပြီ — ${failedIds.length} ကြောင်း မအောင်မြင်ပါ (#${shown}). Re-translate နဲ့ တစ်ကြောင်းချင်း ပြန်လုပ်နိုင်ပါတယ်။${qcNote}`, 8000);
       } else if (missingIds.length) {
         const shown = missingIds.slice(0, 10).join(', ') + (missingIds.length > 10 ? '…' : '');
-        setStatus(`သတိပေးချက် — ${missingIds.length} ကြောင်း AI က ပြန်မပေးပါ (#${shown})။ Re-translate နဲ့ ပြန်လုပ်နိုင်ပါတယ်။`, 8000);
+        setStatus(`သတိပေးချက် — ${missingIds.length} ကြောင်း AI က ပြန်မပေးပါ (#${shown})။ Re-translate နဲ့ ပြန်လုပ်နိုင်ပါတယ်။${qcNote}`, 8000);
       } else {
-        setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!", 4000);
+        setStatus("ဘာသာပြန်ဆိုခြင်း ပြီးစီးပါပြီ!" + qcNote, 8000);
       }
     }
 
