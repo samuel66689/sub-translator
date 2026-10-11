@@ -821,7 +821,7 @@ def qc():
                     "fixed": fixed, "stillBad": still_bad})
 
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="my">
 <head>
   <meta charset="UTF-8">
@@ -1522,7 +1522,7 @@ HTML_PAGE = """<!DOCTYPE html>
         video.src = currentVideoUrl;
         document.getElementById('videoContainer').style.display = 'block';
         document.getElementById('followBar').style.display = 'flex';
-        attachOnly = subtitles.length > 0 && confirm("Subtitle ရှိပြီးသား ဖြစ်ပါသည်။\\n\\nOK = Video ကို SRT နှင့် တိုက်စစ်ရန်သာ ထည့်မည် (Transcribe မလုပ်ပါ)\\nCancel = Whisper AI ဖြင့် Subtitle အသစ်ထုတ်မည် (ရှိပြီးသားကို အစားထိုးမည်)");
+        attachOnly = subtitles.length > 0 && confirm("Subtitle ရှိပြီးသား ဖြစ်ပါသည်။\n\nOK = Video ကို SRT နှင့် တိုက်စစ်ရန်သာ ထည့်မည် (Transcribe မလုပ်ပါ)\nCancel = Whisper AI ဖြင့် Subtitle အသစ်ထုတ်မည် (ရှိပြီးသားကို အစားထိုးမည်)");
       }
 
       if (ext === 'srt') {
@@ -1584,19 +1584,19 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     function parseSRT(txt) {
-      const blocks = txt.trim().replace(/\\r\\n/g, '\\n').split(/\\n\\s*\\n/);
+      const blocks = txt.trim().replace(/\r\n/g, '\n').split(/\n\s*\n/);
       subtitles = [];
       blocks.forEach((b, i) => {
-        const l = b.trim().split('\\n');
+        const l = b.trim().split('\n');
         if (l.length >= 2) {
-          const tIdx = /^\\d+$/.test(l[0].trim()) ? 1 : 0;
+          const tIdx = /^\d+$/.test(l[0].trim()) ? 1 : 0;
           if (l[tIdx] && l[tIdx].includes('-->')) {
             const [s, e] = l[tIdx].split('-->').map(x => x.trim());
             subtitles.push({
               id: i + 1,
               startTime: s,
               endTime: e,
-              originalText: l.slice(tIdx + 1).join('\\n'),
+              originalText: l.slice(tIdx + 1).join('\n'),
               translatedText: ''
             });
           }
@@ -1708,7 +1708,7 @@ HTML_PAGE = """<!DOCTYPE html>
     // pos အနီးဆုံး စာကြောင်း/စကားလုံး အဆုံးသတ်နေရာကို ရှာ
     function snapCut(text, pos) {
       pos = Math.max(1, Math.min(text.length - 1, Math.round(pos)));
-      const sent = /[။.!?!\\n]/g;
+      const sent = /[။.!?!\n]/g;
       let m, best = -1;
       while ((m = sent.exec(text))) {
         const p = m.index + 1;
@@ -2025,8 +2025,8 @@ HTML_PAGE = """<!DOCTYPE html>
         if (!success && isTranslating) {
           failedIds.push(...chunk.map(s => s.id));
           const goOn = confirm(
-            `#${chunk[0].id} မှ #${chunk[chunk.length - 1].id} ကို ၃ ကြိမ်လုံး ဘာသာပြန်မရပါ။\\n\\n` +
-            `OK = ကျန်တာတွေ ဆက်ဘာသာပြန်မယ်\\nCancel = ဒီမှာတင် ရပ်မယ်`
+            `#${chunk[0].id} မှ #${chunk[chunk.length - 1].id} ကို ၃ ကြိမ်လုံး ဘာသာပြန်မရပါ။\n\n` +
+            `OK = ကျန်တာတွေ ဆက်ဘာသာပြန်မယ်\nCancel = ဒီမှာတင် ရပ်မယ်`
           );
           if (!goOn) { isTranslating = false; break; }
         }
@@ -2055,13 +2055,13 @@ HTML_PAGE = """<!DOCTYPE html>
 
     function downloadOriginalSRT() {
       if (!subtitles.length) return;
-      let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.originalText}\\n`).join('\\n');
+      let out = subtitles.map((s, i) => `${i + 1}\n${s.startTime} --> ${s.endTime}\n${s.originalText}\n`).join('\n');
       askDownloadName(out, `${uploadedFileName}_original`);
     }
 
     function downloadTranslatedSRT() {
       if (!subtitles.length) return;
-      let out = subtitles.map((s, i) => `${i + 1}\\n${s.startTime} --> ${s.endTime}\\n${s.translatedText || s.originalText}\\n`).join('\\n');
+      let out = subtitles.map((s, i) => `${i + 1}\n${s.startTime} --> ${s.endTime}\n${s.translatedText || s.originalText}\n`).join('\n');
       askDownloadName(out, `${uploadedFileName}_translated`);
     }
 
@@ -2082,8 +2082,8 @@ HTML_PAGE = """<!DOCTYPE html>
     function confirmDownload() {
       if (!pendingDownload) return;
       const name = document.getElementById('downloadName').value
-        .replace(/[\\\\/:*?"<>|]+/g, '')
-        .replace(/\\.srt$/i, '')
+        .replace(/[\\/:*?"<>|]+/g, '')
+        .replace(/\.srt$/i, '')
         .trim() || pendingDownload.defaultName;
       triggerDownload(pendingDownload.content, `${name}.srt`);
       closeDownloadModal();
