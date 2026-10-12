@@ -679,6 +679,12 @@ def translate():
                     ]
                 }
             ],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+            ],
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "temperature": 0.25
@@ -698,7 +704,15 @@ def translate():
         res_json = res.json()
         candidates = res_json.get('candidates') or []
         if not candidates or 'content' not in candidates[0]:
-            return jsonify({"error": "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ"}), 400
+            fb = res_json.get('promptFeedback') or {}
+            reason = fb.get('blockReason') or (candidates[0].get('finishReason') if candidates else '')
+            if reason == 'SAFETY':
+                msg = "Gemini safety filter က ဒီအပိုင်းကို ပိတ်ထားပါတယ် — Re-translate နဲ့ တစ်ကြောင်းချင်း ပြန်လုပ်ကြည့်ပါ"
+            elif reason:
+                msg = f"Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ ({reason})"
+            else:
+                msg = "Gemini မှ စာပြန်မထုတ်ပေးနိုင်ပါ"
+            return jsonify({"error": msg}), 400
 
         parts = candidates[0]['content'].get('parts') or []
         raw_text = ''.join(p.get('text', '') for p in parts)
@@ -765,6 +779,12 @@ def _qc_retranslate_one(api_key, model_id, src_text):
         "contents": [{"role": "user", "parts": [
             {"text": _QC_SYS},
             {"text": json.dumps({"text": src_text}, ensure_ascii=False)}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+        ],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
     }
     try:
